@@ -34,3 +34,6 @@ bench-repos/
 venv/
 .venv/
 env/
+
+# Git worktrees
+.worktrees/

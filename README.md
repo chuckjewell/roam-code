@@ -146,7 +146,7 @@ roam health
 | `roam why <name> [name2 ...]` | Explain why a symbol matters: role classification (Core utility/Hub/Bridge/Leaf/Internal), transitive reach, critical path, cluster, one-line verdict. Batch mode for triage |
 | `roam safe-delete <symbol>` | Check if a symbol can be safely deleted — SAFE/REVIEW/UNSAFE verdict with reasoning |
 | `roam diff [--staged] [--full] [REV_RANGE]` | Blast radius of uncommitted changes or a commit range (e.g., `HEAD~3..HEAD`) |
-| `roam pr-risk [REV_RANGE]` | PR risk score (0-100) + new dead exports + suggested reviewers |
+| `roam pr-risk [REV_RANGE]` | PR risk score (0-100) + new dead exports + suggested reviewers. Includes historical change-set novelty signal from commit hyperedges |
 | `roam describe [--write] [--force]` | Auto-generate project description (CLAUDE.md) from the index — domain-aware keyword extraction |
 | `roam test-map <name>` | Map a symbol or file to its test coverage |
 | `roam sketch <dir> [--full]` | Compact structural skeleton of a directory (API surface) |
@@ -167,7 +167,7 @@ roam health
 |---------|-------------|
 | `roam weather [-n N]` | Hotspots ranked by churn x complexity |
 | `roam owner <path>` | Code ownership: who owns a file or directory |
-| `roam coupling [-n N]` | Temporal coupling: file pairs that change together |
+| `roam coupling [-n N] [--mode pair\|set]` | Temporal coupling: pair mode shows file co-change pairs; set mode shows recurring 3+ file change sets |
 
 ### Inheritance
 
@@ -373,9 +373,10 @@ Run `roam index` once, then use these commands instead of Glob/Grep/Read explora
 - `roam safe-delete <symbol>` -- check if safe to delete (SAFE/REVIEW/UNSAFE verdict)
 - `roam diff` -- blast radius of uncommitted changes
 - `roam diff HEAD~3..HEAD` -- blast radius of a commit range
-- `roam pr-risk HEAD~3..HEAD` -- PR risk score (0-100) + dead exports + reviewers
+- `roam pr-risk HEAD~3..HEAD` -- PR risk score (0-100) + dead exports + reviewers + change-set novelty
 - `roam owner <path>` -- code ownership (who should review)
 - `roam coupling` -- temporal coupling (hidden dependencies)
+- `roam coupling --mode set` -- recurring 3+ file change sets from commit hyperedges
 - `roam fan [symbol|file]` -- fan-in/fan-out (`--no-framework` to filter primitives)
 - `roam dead` -- unreferenced exports with SAFE/REVIEW/INTENTIONAL verdicts
 - `roam uses <name>` -- all consumers: callers, importers, inheritors

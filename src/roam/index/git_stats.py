@@ -213,7 +213,8 @@ def compute_cochange(conn: sqlite3.Connection):
 
     For every commit, find all changed files that have a file_id in the files
     table, then for each ordered pair ``(a, b)`` where ``a < b``, increment
-    the co-change count.
+    the co-change count. Also persists commit-level hyperedges for n-ary
+    change-set analysis.
     """
     # Gather commit_id -> set of file_ids
     rows = conn.execute(
@@ -235,9 +236,18 @@ def compute_cochange(conn: sqlite3.Connection):
         for a, b in combinations(sorted(file_ids), 2):
             pair_counts[(a, b)] += 1
 
+    # Preserve commit_id with members (stable ordering for deterministic output)
+    hyperedges = [
+        (cid, sorted(file_ids))
+        for cid, file_ids in sorted(commit_files.items())
+        if 2 <= len(file_ids) <= 100
+    ]
+
     # Write in chunks
     with conn:
         conn.execute("DELETE FROM git_cochange")
+        conn.execute("DELETE FROM git_hyperedge_members")
+        conn.execute("DELETE FROM git_hyperedges")
         batch: list[tuple[int, int, int]] = []
         for (a, b), count in pair_counts.items():
             batch.append((a, b, count))
@@ -255,7 +265,26 @@ def compute_cochange(conn: sqlite3.Connection):
                 batch,
             )
 
+        # Store commit hyperedges and their members.
+        for commit_id, members in hyperedges:
+            pair_count = len(members) * (len(members) - 1) // 2
+            cur = conn.execute(
+                "INSERT INTO git_hyperedges (commit_id, file_count, pair_count) "
+                "VALUES (?, ?, ?)",
+                (commit_id, len(members), pair_count),
+            )
+            hyperedge_id = cur.lastrowid
+            if hyperedge_id is None:
+                continue
+            member_rows = [(hyperedge_id, fid, idx) for idx, fid in enumerate(members)]
+            conn.executemany(
+                "INSERT INTO git_hyperedge_members (hyperedge_id, file_id, ordinal) "
+                "VALUES (?, ?, ?)",
+                member_rows,
+            )
+
     log.info("Computed co-change for %d file pairs", len(pair_counts))
+    log.info("Stored %d commit hyperedges", len(hyperedges))
 
 
 # ---------------------------------------------------------------------------

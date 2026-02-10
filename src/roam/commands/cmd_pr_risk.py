@@ -1,6 +1,7 @@
 """Compute risk score for pending changes."""
 
 import os
+import sqlite3
 import subprocess
 
 import click
@@ -73,6 +74,57 @@ def _get_file_stat(root, path):
     except Exception:
         pass
     return 0, 0
+
+
+def _hypergraph_novelty(conn, changed_file_ids):
+    """Return (novelty_score, exact_support, best_overlap) for changed file set.
+
+    novelty_score: 0.0 = common historical pattern, 1.0 = unseen pattern.
+    exact_support: Number of historical commits with the exact same file set.
+    best_overlap: Best Jaccard overlap against any historical change-set.
+    """
+    if len(changed_file_ids) < 2:
+        return 0.0, 0, 1.0
+
+    try:
+        rows = conn.execute(
+            "SELECT gm.hyperedge_id, gm.file_id "
+            "FROM git_hyperedge_members gm "
+            "JOIN git_hyperedges gh ON gh.id = gm.hyperedge_id "
+            "WHERE gh.file_count >= 2 "
+            "ORDER BY gm.hyperedge_id"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Older indexes may not have hyperedge tables yet.
+        return 1.0, 0, 0.0
+
+    if not rows:
+        return 1.0, 0, 0.0
+
+    patterns = {}
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(r["hyperedge_id"], set()).add(r["file_id"])
+    for members in grouped.values():
+        key = tuple(sorted(members))
+        patterns[key] = patterns.get(key, 0) + 1
+
+    changed = set(changed_file_ids)
+    changed_key = tuple(sorted(changed))
+    exact_support = patterns.get(changed_key, 0)
+
+    best_overlap = 0.0
+    for key in patterns:
+        other = set(key)
+        union = changed | other
+        if not union:
+            continue
+        overlap = len(changed & other) / len(union)
+        if overlap > best_overlap:
+            best_overlap = overlap
+
+    novelty = max(0.0, 1.0 - best_overlap)
+    return novelty, exact_support, best_overlap
 
 
 @click.command("pr-risk")
@@ -237,6 +289,11 @@ def pr_risk(ctx, commit_range, staged):
             if max_possible > 0:
                 coupling_score = min(1.0, cross_edges / max_possible)
 
+        # --- 5b. Hypergraph pattern novelty ---
+        hypergraph_novelty, pattern_support, pattern_overlap = _hypergraph_novelty(
+            conn, set(file_map.values())
+        )
+
         # --- 6. Dead code check ---
         new_dead = []
         for path, fid in file_map.items():
@@ -258,7 +315,8 @@ def pr_risk(ctx, commit_range, staged):
             hotspot_score * 20 +                       # 0-20: hotspot
             (1 - test_coverage) * 25 +                 # 0-25: untested
             bus_factor_risk * 15 +                     # 0-15: bus factor
-            coupling_score * 15                        # 0-15: coupling
+            coupling_score * 15 +                      # 0-15: coupling
+            hypergraph_novelty * 8                     # 0-8: novel change-set
         )
         risk = min(risk, 100)
 
@@ -318,6 +376,9 @@ def pr_risk(ctx, commit_range, staged):
                 "test_coverage_pct": round(test_coverage * 100, 1),
                 "bus_factor_risk": round(bus_factor_risk, 2),
                 "coupling_score": round(coupling_score, 2),
+                "hypergraph_novelty_score": round(hypergraph_novelty, 2),
+                "historical_pattern_support": pattern_support,
+                "best_pattern_overlap": round(pattern_overlap, 2),
                 "dead_exports": len(new_dead),
                 "per_file": per_file,
                 "suggested_reviewers": [
@@ -339,6 +400,8 @@ def pr_risk(ctx, commit_range, staged):
         click.echo(f"  Bus factor:    {'RISK' if bus_factor_risk >= 0.5 else 'ok':>5s}  "
                     f"{'(single-author file!)' if bus_factor_risk >= 1.0 else ''}")
         click.echo(f"  Coupling:      {coupling_score * 100:5.1f}%")
+        click.echo(f"  Pattern nov.:  {hypergraph_novelty * 100:5.1f}%  "
+                    f"(best overlap {pattern_overlap * 100:.0f}%, support {pattern_support})")
         click.echo()
 
         # Per-file table

@@ -66,6 +66,20 @@ CREATE TABLE IF NOT EXISTS git_cochange (
     PRIMARY KEY (file_id_a, file_id_b)
 );
 
+CREATE TABLE IF NOT EXISTS git_hyperedges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    commit_id INTEGER NOT NULL UNIQUE REFERENCES git_commits(id) ON DELETE CASCADE,
+    file_count INTEGER NOT NULL,
+    pair_count INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS git_hyperedge_members (
+    hyperedge_id INTEGER NOT NULL REFERENCES git_hyperedges(id) ON DELETE CASCADE,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    ordinal INTEGER DEFAULT 0,
+    PRIMARY KEY (hyperedge_id, file_id)
+);
+
 CREATE TABLE IF NOT EXISTS file_stats (
     file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     commit_count INTEGER DEFAULT 0,
@@ -99,6 +113,9 @@ CREATE INDEX IF NOT EXISTS idx_file_edges_source ON file_edges(source_file_id);
 CREATE INDEX IF NOT EXISTS idx_file_edges_target ON file_edges(target_file_id);
 CREATE INDEX IF NOT EXISTS idx_git_changes_file ON git_file_changes(file_id);
 CREATE INDEX IF NOT EXISTS idx_git_changes_commit ON git_file_changes(commit_id);
+CREATE INDEX IF NOT EXISTS idx_git_hyperedges_commit ON git_hyperedges(commit_id);
+CREATE INDEX IF NOT EXISTS idx_git_hyper_members_hid ON git_hyperedge_members(hyperedge_id);
+CREATE INDEX IF NOT EXISTS idx_git_hyper_members_file ON git_hyperedge_members(file_id);
 CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
 CREATE INDEX IF NOT EXISTS idx_graph_metrics_pagerank ON graph_metrics(pagerank DESC);
 CREATE INDEX IF NOT EXISTS idx_symbols_parent ON symbols(parent_id);

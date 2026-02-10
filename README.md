@@ -188,6 +188,7 @@ roam --json health          # {"cycles": [...], "god_components": [...], "action
 roam --json symbol Flask    # {"name": "Flask", "callers": [...], "callees": [...]}
 roam --json why Flask         # {"symbols": [{"name": "Flask", "role": "Hub", "reach": 89, ...}]}
 roam --json diff HEAD~3..HEAD  # {"changed_files": 11, "affected_symbols": 405, ...}
+roam --json pr-risk HEAD~3..HEAD  # {"risk_score": 47, "hypergraph_novelty_score": 0.38, "historical_pattern_support": 0.62, ...}
 ```
 
 ## Walkthrough: Investigating a Codebase
@@ -387,6 +388,17 @@ Run `roam index` once, then use these commands instead of Glob/Grep/Read explora
 - `roam sketch <dir>` -- structural skeleton of a directory
 
 Use `roam --json <command>` for structured JSON output (all 29 commands).
+For PR triage bots, prefer `roam --json pr-risk <range>` and read:
+- `risk_score` (0-100)
+- `hypergraph_novelty_score` (0.0-1.0, higher means less historical support)
+- `historical_pattern_support` (0.0-1.0, overlap with known recurring change sets)
+- `best_pattern_overlap` (best Jaccard overlap against historical change sets)
+
+Use coupling modes deliberately:
+- `roam coupling` (pair mode) for broad hidden dependency scanning
+- `roam coupling --mode set` when you need recurring multi-file change patterns for planning/refactoring
+
+If `--mode set` is empty on a long-lived repo, rebuild Git signals with `roam index --force` once (older indexes may not have commit hyperedges yet).
 ```
 
 <details>
@@ -431,6 +443,7 @@ The pattern is the same for any tool that can execute shell commands: tell the a
 
 - **After `git pull` / branch switch:** `roam index` (incremental, fast)
 - **After major refactor or first clone:** `roam index --force` (full rebuild)
+- **After upgrading to hypergraph-backed coupling/pr-risk from an older index:** `roam index --force` (backfills commit hyperedges)
 - **Index seems stale or corrupt:** `roam index --force`
 - **No rebuild needed:** Roam auto-detects changed files on every `roam index` run
 
@@ -617,6 +630,7 @@ Roam is a static analysis tool. These are fundamental trade-offs, not bugs:
 | Too many false positives in `roam dead` | Check the "N files had no symbols extracted" note. Files without parsers don't produce symbols, so their exports appear unreferenced. |
 | Symbol resolves to wrong file | Use `file:symbol` syntax: `roam symbol myfile:MyFunction` to disambiguate. |
 | Vue template functions show fan-in:0 | Rebuild the index with `roam index --force` (v4.2.0 fixed template edge attribution). |
+| `roam coupling --mode set` returns no rows | Run `roam index --force` once to backfill commit hyperedges, then retry. |
 | Slow first index | Expected for large projects. Use `roam index --verbose` to monitor progress. Subsequent runs are incremental. |
 
 ## Update / Uninstall

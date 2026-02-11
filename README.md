@@ -140,10 +140,10 @@ roam health
 | `roam trace <source> <target> [-k N]` | Dependency paths between two symbols with coupling strength and quality scoring. Shows up to k paths (default 3) with edge-kind labels, coupling classification (strong/moderate/weak), hub detection (high-degree intermediates flagged), and path quality ranking. Paths sorted by quality, not just length |
 | `roam deps <path> [--full]` | What a file imports and what imports it |
 | `roam search <pattern> [--kind KIND] [--full]` | Find symbols by name pattern — PageRank-ranked with signatures |
-| `roam grep <pattern> [-g glob] [-n N]` | Text search annotated with enclosing symbol context |
+| `roam grep <pattern> [-g glob] [--source-only] [--exclude GLOBS] [-n N]` | Text search annotated with enclosing symbol context; optional source-only/exclude filtering to reduce docs/config noise |
 | `roam impact <symbol>` | Blast radius: what breaks if a symbol changes |
 | `roam split <file>` | Analyze a file's internal structure: symbol groups, isolation %, cross-group coupling, extraction suggestions |
-| `roam risk [-n N] [--domain KW]` | Domain-weighted risk ranking using three-source matching: symbol name keywords, callee-chain analysis (up to 3 hops with decay), and file path-zone matching. UI files auto-dampened (except zone-matched symbols — zone overrides UI dampening). Tuned keyword weights to reduce false positives from ambiguous terms. Configurable via `.roam/domain-weights.json` and `.roam/path-zones.json` |
+| `roam risk [-n N] [--domain KW] [--explain]` | Domain-weighted risk ranking using three-source matching: symbol name keywords, callee-chain analysis (up to 3 hops with decay), and file path-zone matching. `--explain` prints full callee-chain matches for triage. UI files auto-dampened (except zone-matched symbols — zone overrides UI dampening). Tuned keyword weights to reduce false positives from ambiguous terms. Configurable via `.roam/domain-weights.json` and `.roam/path-zones.json` |
 | `roam why <name> [name2 ...]` | Explain why a symbol matters: role classification (Core utility/Hub/Bridge/Leaf/Internal), transitive reach, critical path, cluster, one-line verdict. Batch mode for triage |
 | `roam safe-delete <symbol>` | Check if a symbol can be safely deleted — SAFE/REVIEW/UNSAFE verdict with reasoning |
 | `roam diff [--staged] [--full] [REV_RANGE]` | Blast radius of uncommitted changes or a commit range (e.g., `HEAD~3..HEAD`) |
@@ -371,12 +371,12 @@ Run `roam index` once, then use these commands instead of Glob/Grep/Read explora
 - `roam deps <path>` -- file import/imported-by graph
 - `roam trace <source> <target>` -- dependency paths with coupling strength, hub detection, quality ranking
 - `roam search <pattern>` -- find symbols by name (PageRank-ranked with signatures)
-- `roam grep <pattern>` -- text search with symbol context
+- `roam grep <pattern>` -- text search with symbol context (`--source-only` and `--exclude` to suppress docs/config noise)
 - `roam health` -- architecture problems with location-aware severity (utility paths get relaxed thresholds for god components and bottlenecks, `--no-framework` filters primitives)
 - `roam weather` -- hotspots (churn x complexity)
 - `roam impact <symbol>` -- blast radius (what breaks if changed)
 - `roam split <file>` -- internal symbol groups with isolation % and extraction suggestions
-- `roam risk` -- domain-weighted risk ranking (3-source matching: name + callee-chain + path-zone, UI auto-dampened except zone matches)
+- `roam risk` -- domain-weighted risk ranking (3-source matching: name + callee-chain + path-zone, `--explain` for full chain output)
 - `roam why <name>` -- role, reach, criticality, verdict (batch: `roam why A B C`)
 - `roam safe-delete <symbol>` -- check if safe to delete (SAFE/REVIEW/UNSAFE verdict)
 - `roam diff` -- blast radius of uncommitted changes

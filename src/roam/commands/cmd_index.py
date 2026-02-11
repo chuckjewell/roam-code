@@ -1,8 +1,8 @@
 import time
-from collections import Counter
 
 import click
 
+from roam.commands.metrics_history import append_history
 from roam.output.formatter import to_json
 
 
@@ -14,7 +14,7 @@ def index(ctx, force, verbose):
     """Build or rebuild the codebase index."""
     json_mode = ctx.obj.get('json') if ctx.obj else False
     from roam.index.indexer import Indexer
-    from roam.db.connection import open_db, db_exists
+    from roam.db.connection import open_db, db_exists, find_project_root
     t0 = time.monotonic()
     indexer = Indexer()
     indexer.run(force=force, verbose=verbose)
@@ -64,3 +64,11 @@ def index(ctx, force, verbose):
                 click.echo(f"  Files: {file_count}  Symbols: {sym_count}  Edges: {edge_count}")
                 click.echo(f"  Languages: {lang_str}")
                 click.echo(f"  Avg symbols/file: {avg_sym:.1f}  Parse coverage: {coverage:.0f}%")
+
+            # Append automatic history row for trend tracking.
+            try:
+                root = find_project_root()
+                append_history(root, conn, source="index")
+            except Exception:
+                # History writing must never break indexing.
+                pass

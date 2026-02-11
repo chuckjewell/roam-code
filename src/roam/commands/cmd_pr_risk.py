@@ -7,7 +7,7 @@ import subprocess
 import click
 
 from roam.db.connection import open_db, find_project_root
-from roam.output.formatter import format_table, to_json
+from roam.output.formatter import format_table, to_json, json_envelope
 from roam.commands.resolve import ensure_index
 
 
@@ -148,8 +148,27 @@ def pr_risk(ctx, commit_range, staged):
     if not changed:
         label = commit_range or ("staged" if staged else "unstaged")
         if json_mode:
-            click.echo(to_json({"label": label, "risk_score": 0,
-                                "message": "No changes found"}))
+            click.echo(to_json(json_envelope(
+                "pr-risk",
+                summary={"label": label, "risk_score": 0, "risk_level": "LOW"},
+                label=label,
+                risk_score=0,
+                risk_level="LOW",
+                changed_files=0,
+                blast_radius_pct=0,
+                hotspot_score=0,
+                test_coverage_pct=0,
+                bus_factor_risk=0,
+                coupling_score=0,
+                hypergraph_novelty_score=0,
+                historical_pattern_support=0,
+                best_pattern_overlap=0,
+                dead_exports=0,
+                per_file=[],
+                suggested_reviewers=[],
+                dead_code=[],
+                message="No changes found",
+            )))
         else:
             click.echo(f"No changes found for {label}.")
         return
@@ -171,8 +190,28 @@ def pr_risk(ctx, commit_range, staged):
 
         if not file_map:
             if json_mode:
-                click.echo(to_json({"risk_score": 0,
-                                    "message": "Changed files not in index"}))
+                label = commit_range or ("staged" if staged else "unstaged")
+                click.echo(to_json(json_envelope(
+                    "pr-risk",
+                    summary={"label": label, "risk_score": 0, "risk_level": "LOW"},
+                    label=label,
+                    risk_score=0,
+                    risk_level="LOW",
+                    changed_files=0,
+                    blast_radius_pct=0,
+                    hotspot_score=0,
+                    test_coverage_pct=0,
+                    bus_factor_risk=0,
+                    coupling_score=0,
+                    hypergraph_novelty_score=0,
+                    historical_pattern_support=0,
+                    best_pattern_overlap=0,
+                    dead_exports=0,
+                    per_file=[],
+                    suggested_reviewers=[],
+                    dead_code=[],
+                    message="Changed files not in index",
+                )))
             else:
                 click.echo("Changed files not found in index. Run `roam index` first.")
             return
@@ -366,26 +405,28 @@ def pr_risk(ctx, commit_range, staged):
         label = commit_range or ("staged" if staged else "unstaged")
 
         if json_mode:
-            click.echo(to_json({
-                "label": label,
-                "risk_score": risk,
-                "risk_level": level,
-                "changed_files": len(file_map),
-                "blast_radius_pct": round(blast_pct, 1),
-                "hotspot_score": round(hotspot_score, 2),
-                "test_coverage_pct": round(test_coverage * 100, 1),
-                "bus_factor_risk": round(bus_factor_risk, 2),
-                "coupling_score": round(coupling_score, 2),
-                "hypergraph_novelty_score": round(hypergraph_novelty, 2),
-                "historical_pattern_support": pattern_support,
-                "best_pattern_overlap": round(pattern_overlap, 2),
-                "dead_exports": len(new_dead),
-                "per_file": per_file,
-                "suggested_reviewers": [
+            click.echo(to_json(json_envelope(
+                "pr-risk",
+                summary={"label": label, "risk_score": risk, "risk_level": level},
+                label=label,
+                risk_score=risk,
+                risk_level=level,
+                changed_files=len(file_map),
+                blast_radius_pct=round(blast_pct, 1),
+                hotspot_score=round(hotspot_score, 2),
+                test_coverage_pct=round(test_coverage * 100, 1),
+                bus_factor_risk=round(bus_factor_risk, 2),
+                coupling_score=round(coupling_score, 2),
+                hypergraph_novelty_score=round(hypergraph_novelty, 2),
+                historical_pattern_support=pattern_support,
+                best_pattern_overlap=round(pattern_overlap, 2),
+                dead_exports=len(new_dead),
+                per_file=per_file,
+                suggested_reviewers=[
                     {"author": a, "lines": l} for a, l in top_authors
                 ],
-                "dead_code": new_dead[:10],
-            }))
+                dead_code=new_dead[:10],
+            )))
             return
 
         # --- Text output ---

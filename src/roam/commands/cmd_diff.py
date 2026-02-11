@@ -5,7 +5,7 @@ import subprocess
 import click
 
 from roam.db.connection import open_db, find_project_root
-from roam.output.formatter import format_table, to_json
+from roam.output.formatter import format_table, to_json, json_envelope
 from roam.commands.resolve import ensure_index
 
 
@@ -48,12 +48,30 @@ def diff_cmd(ctx, commit_range, staged, full):
     root = find_project_root()
 
     changed = _get_changed_files(root, staged, commit_range)
+    source = "range" if commit_range else ("staged" if staged else "unstaged")
+    label = commit_range or source
+    no_changes_message = (
+        f"No changes found for range {label}."
+        if source == "range"
+        else f"No changes found for {label}."
+    )
     if not changed:
-        if commit_range:
-            label = commit_range
+        if json_mode:
+            click.echo(to_json(json_envelope(
+                "diff",
+                summary={"source": source, "label": label, "changed_files": 0},
+                source=source,
+                label=label,
+                changed_files=0,
+                symbols_defined=0,
+                affected_symbols=0,
+                affected_files=0,
+                per_file=[],
+                blast_radius=[],
+                message=no_changes_message,
+            )))
         else:
-            label = "staged" if staged else "unstaged"
-        click.echo(f"No changes found for {label}.")
+            click.echo(no_changes_message)
         return
 
     with open_db(readonly=True) as conn:
@@ -72,8 +90,23 @@ def diff_cmd(ctx, commit_range, staged, full):
                 file_map[row["path"]] = row["id"]
 
         if not file_map:
-            click.echo(f"Changed files not found in index ({len(changed)} files changed).")
-            click.echo("Try running `roam index` first.")
+            if json_mode:
+                click.echo(to_json(json_envelope(
+                    "diff",
+                    summary={"source": source, "label": label, "changed_files": 0},
+                    source=source,
+                    label=label,
+                    changed_files=0,
+                    symbols_defined=0,
+                    affected_symbols=0,
+                    affected_files=0,
+                    per_file=[],
+                    blast_radius=[],
+                    message=f"Changed files not found in index ({len(changed)} files changed).",
+                )))
+            else:
+                click.echo(f"Changed files not found in index ({len(changed)} files changed).")
+                click.echo("Try running `roam index` first.")
             return
 
         # Get symbols in changed files
@@ -130,22 +163,21 @@ def diff_cmd(ctx, commit_range, staged, full):
         file_impacts.sort(key=lambda x: x["affected_syms"], reverse=True)
 
         if json_mode:
-            click.echo(to_json({
-                "label": commit_range or ("staged" if staged else "unstaged"),
-                "changed_files": len(file_map),
-                "symbols_defined": total_syms,
-                "affected_symbols": len(all_affected_syms),
-                "affected_files": len(all_affected_files),
-                "per_file": file_impacts,
-                "blast_radius": sorted(all_affected_files),
-            }))
+            click.echo(to_json(json_envelope(
+                "diff",
+                summary={"source": source, "label": label, "changed_files": len(file_map)},
+                source=source,
+                label=label,
+                changed_files=len(file_map),
+                symbols_defined=total_syms,
+                affected_symbols=len(all_affected_syms),
+                affected_files=len(all_affected_files),
+                per_file=file_impacts,
+                blast_radius=sorted(all_affected_files),
+            )))
             return
 
         # Output
-        if commit_range:
-            label = commit_range
-        else:
-            label = "staged" if staged else "unstaged"
         click.echo(f"=== Blast Radius ({label} changes) ===\n")
         click.echo(f"Changed files: {len(file_map)}  Symbols defined: {total_syms}")
         click.echo(f"Affected symbols: {len(all_affected_syms)}  Affected files: {len(all_affected_files)}")

@@ -46,6 +46,7 @@ _COMMANDS = {
     "coverage-gaps": ("roam.commands.cmd_coverage_gaps", "coverage_gaps"),
     "snapshot": ("roam.commands.cmd_snapshot", "snapshot"),
     "trend": ("roam.commands.cmd_trend", "trend"),
+    "report": ("roam.commands.cmd_report", "report"),
 }
 
 

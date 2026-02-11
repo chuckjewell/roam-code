@@ -169,6 +169,8 @@ roam health
 | `roam weather [-n N]` | Hotspots ranked by churn x complexity |
 | `roam owner <path>` | Code ownership: who owns a file or directory |
 | `roam coupling [-n N] [--mode pair\|set] [--against <file> ... \| --staged \| --pr [--base REF]] [--min-strength F] [--min-cochanges N]` | Temporal coupling: pair mode shows file co-change pairs; set mode shows recurring 3+ file change sets; against mode checks expected co-change partners for a selected change set |
+| `roam snapshot [--tag NAME]` | Persist current structural metrics to `.roam/history.json` |
+| `roam trend [--range N] [--assert EXPR]` | Show structural metric trends from history and optionally enforce CI-style assertions (e.g. `cycles<=8`) |
 
 ### Inheritance
 
@@ -387,6 +389,8 @@ Run `roam index` once, then use these commands instead of Glob/Grep/Read explora
 - `roam owner <path>` -- code ownership (who should review)
 - `roam coupling` -- temporal coupling (hidden dependencies)
 - `roam coupling --mode set` -- recurring 3+ file change sets from commit hyperedges
+- `roam snapshot --tag baseline` -- persist current structural metrics to history
+- `roam trend --range 5 --assert cycles<=8` -- view trend rows and enforce metric thresholds
 - `roam fan [symbol|file]` -- fan-in/fan-out (`--no-framework` to filter primitives)
 - `roam dead` -- unreferenced exports with SAFE/REVIEW/INTENTIONAL verdicts (`--by-directory`, `--by-kind`, `--summary` for planning)
 - `roam uses <name>` -- all consumers: callers, importers, inheritors

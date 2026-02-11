@@ -6,8 +6,9 @@ import sqlite3
 
 import click
 
-from roam.db.connection import open_db
+from roam.db.connection import open_db, find_project_root
 from roam.output.formatter import format_table, to_json, json_envelope
+from roam.commands.changed_files import resolve_changed_files
 from roam.commands.resolve import ensure_index
 
 
@@ -21,6 +22,170 @@ def _load_structural_edges(conn):
         a, b = r["source_file_id"], r["target_file_id"]
         structural.add((min(a, b), max(a, b)))
     return structural
+
+
+def _resolve_file_ids(conn, paths):
+    """Resolve file paths to indexed file ids."""
+    resolved = {}
+    unresolved = []
+    for path in paths:
+        row = conn.execute(
+            "SELECT id, path FROM files WHERE path = ?", (path,)
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT id, path FROM files WHERE path LIKE ? LIMIT 1",
+                (f"%{path}",),
+            ).fetchone()
+        if row:
+            resolved[row["id"]] = row["path"]
+        else:
+            unresolved.append(path)
+    return resolved, unresolved
+
+
+def _merge_partner(bucket, partner_path, source_path, cochange_count, strength):
+    """Merge coupling evidence for one partner file."""
+    entry = bucket.get(partner_path)
+    if not entry:
+        bucket[partner_path] = {
+            "path": partner_path,
+            "cochange_count": cochange_count,
+            "strength": round(strength, 2),
+            "via": [source_path],
+        }
+        return
+
+    if strength > entry["strength"] or (
+        strength == entry["strength"] and cochange_count > entry["cochange_count"]
+    ):
+        entry["strength"] = round(strength, 2)
+        entry["cochange_count"] = cochange_count
+
+    if source_path not in entry["via"]:
+        entry["via"].append(source_path)
+
+
+def _run_against_mode(
+    conn,
+    changed_paths,
+    source_label,
+    count,
+    min_strength,
+    min_cochanges,
+    json_mode,
+):
+    """Show expected co-changes relative to a provided change set."""
+    file_map, unresolved = _resolve_file_ids(conn, changed_paths)
+
+    if not file_map:
+        if json_mode:
+            click.echo(to_json(json_envelope(
+                "coupling",
+                summary={"mode": "against", "missing_count": 0, "included_count": 0},
+                against=changed_paths,
+                source=source_label,
+                missing=[],
+                included=[],
+                unresolved=unresolved,
+                thresholds={"min_strength": min_strength, "min_cochanges": min_cochanges},
+                message="Changed files not found in index.",
+            )))
+        else:
+            click.echo("Changed files not found in index. Run `roam index` first.")
+        return
+
+    changed_ids = set(file_map.keys())
+    file_commits = {
+        r["file_id"]: (r["commit_count"] or 1)
+        for r in conn.execute("SELECT file_id, commit_count FROM file_stats").fetchall()
+    }
+
+    missing = {}
+    included = {}
+
+    for source_id, source_path in file_map.items():
+        rows = conn.execute(
+            """
+            SELECT
+                CASE WHEN gc.file_id_a = ? THEN gc.file_id_b ELSE gc.file_id_a END AS partner_id,
+                gc.cochange_count,
+                f.path AS partner_path
+            FROM git_cochange gc
+            JOIN files f ON f.id = CASE WHEN gc.file_id_a = ? THEN gc.file_id_b ELSE gc.file_id_a END
+            WHERE gc.file_id_a = ? OR gc.file_id_b = ?
+            ORDER BY gc.cochange_count DESC
+            LIMIT ?
+            """,
+            (source_id, source_id, source_id, source_id, count),
+        ).fetchall()
+
+        for row in rows:
+            partner_id = row["partner_id"]
+            partner_path = row["partner_path"]
+            cochange_count = row["cochange_count"]
+            avg_commits = (
+                file_commits.get(source_id, 1) + file_commits.get(partner_id, 1)
+            ) / 2
+            strength = (cochange_count / avg_commits) if avg_commits > 0 else 0
+
+            if cochange_count < min_cochanges or strength < min_strength:
+                continue
+
+            bucket = included if partner_id in changed_ids else missing
+            _merge_partner(bucket, partner_path, source_path, cochange_count, strength)
+
+    def _sorted_values(bucket):
+        return sorted(
+            bucket.values(),
+            key=lambda x: (-x["strength"], -x["cochange_count"], x["path"]),
+        )
+
+    missing_rows = _sorted_values(missing)
+    included_rows = _sorted_values(included)
+
+    if json_mode:
+        click.echo(to_json(json_envelope(
+            "coupling",
+            summary={
+                "mode": "against",
+                "input_files": len(file_map),
+                "missing_count": len(missing_rows),
+                "included_count": len(included_rows),
+            },
+            against=sorted(file_map.values()),
+            source=source_label,
+            missing=missing_rows,
+            included=included_rows,
+            unresolved=unresolved,
+            thresholds={"min_strength": min_strength, "min_cochanges": min_cochanges},
+        )))
+        return
+
+    click.echo("=== Missing Co-Changes ===")
+    if missing_rows:
+        for item in missing_rows:
+            via = ", ".join(item["via"][:2])
+            click.echo(
+                f"  {item['path']}  (co-changes {item['cochange_count']}, "
+                f"strength {item['strength']:.0%}, with {via})"
+            )
+    else:
+        click.echo("  (none)")
+
+    click.echo("\n=== Included Co-Changes ===")
+    if included_rows:
+        for item in included_rows:
+            via = ", ".join(item["via"][:2])
+            click.echo(
+                f"  {item['path']}  (co-changes {item['cochange_count']}, "
+                f"strength {item['strength']:.0%}, with {via})"
+            )
+    else:
+        click.echo("  (none)")
+
+    if unresolved:
+        click.echo(f"\nUnresolved paths: {', '.join(unresolved)}")
 
 
 def _run_pair_mode(conn, count, json_mode):
@@ -227,11 +392,75 @@ def _run_set_mode(conn, count, json_mode):
     show_default=True,
     help='pair=co-change pairs, set=recurring 3+ file change sets',
 )
+@click.option('--against', 'against_paths', multiple=True,
+              help='Check expected co-changes against the provided file path(s)')
+@click.option('--staged', is_flag=True,
+              help='Use staged files as the change set for --against mode')
+@click.option('--pr', 'use_pr', is_flag=True,
+              help='Use <base>..HEAD as the change set for --against mode')
+@click.option('--base', 'base_ref', default='main', show_default=True,
+              help='Base ref for --pr mode (compares <base>..HEAD)')
+@click.option('--min-strength', default=0.5, show_default=True,
+              help='Minimum normalized coupling strength to consider expected')
+@click.option('--min-cochanges', default=2, show_default=True,
+              help='Minimum raw co-change count to consider expected')
 @click.pass_context
-def coupling(ctx, count, mode):
+def coupling(
+    ctx,
+    count,
+    mode,
+    against_paths,
+    staged,
+    use_pr,
+    base_ref,
+    min_strength,
+    min_cochanges,
+):
     """Show temporal coupling: file pairs that change together."""
     json_mode = ctx.obj.get('json') if ctx.obj else False
     ensure_index()
+
+    sources = int(bool(against_paths)) + int(bool(staged)) + int(bool(use_pr))
+    if sources > 1:
+        raise click.UsageError("Use only one of --against, --staged, or --pr at a time.")
+
+    if sources == 1:
+        root = find_project_root()
+        changed_paths, source_label = resolve_changed_files(
+            root,
+            against_paths=against_paths,
+            staged=staged,
+            use_pr=use_pr,
+            base_ref=base_ref,
+        )
+        if not changed_paths:
+            if json_mode:
+                click.echo(to_json(json_envelope(
+                    "coupling",
+                    summary={"mode": "against", "missing_count": 0, "included_count": 0},
+                    against=[],
+                    source=source_label,
+                    missing=[],
+                    included=[],
+                    unresolved=[],
+                    thresholds={"min_strength": min_strength, "min_cochanges": min_cochanges},
+                    message="No changed files found for selected source.",
+                )))
+            else:
+                click.echo("No changed files found for selected source.")
+            return
+
+        with open_db(readonly=True) as conn:
+            _run_against_mode(
+                conn,
+                changed_paths,
+                source_label,
+                count,
+                min_strength,
+                min_cochanges,
+                json_mode,
+            )
+        return
 
     with open_db(readonly=True) as conn:
         if mode == "set":

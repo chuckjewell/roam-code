@@ -167,7 +167,7 @@ roam health
 |---------|-------------|
 | `roam weather [-n N]` | Hotspots ranked by churn x complexity |
 | `roam owner <path>` | Code ownership: who owns a file or directory |
-| `roam coupling [-n N] [--mode pair\|set]` | Temporal coupling: pair mode shows file co-change pairs; set mode shows recurring 3+ file change sets |
+| `roam coupling [-n N] [--mode pair\|set] [--against <file> ... \| --staged \| --pr [--base REF]] [--min-strength F] [--min-cochanges N]` | Temporal coupling: pair mode shows file co-change pairs; set mode shows recurring 3+ file change sets; against mode checks expected co-change partners for a selected change set |
 
 ### Inheritance
 

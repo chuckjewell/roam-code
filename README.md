@@ -378,7 +378,9 @@ Run `roam index` once, then use these commands instead of Glob/Grep/Read explora
 - `roam why <name>` -- role, reach, criticality, verdict (batch: `roam why A B C`)
 - `roam safe-delete <symbol>` -- check if safe to delete (SAFE/REVIEW/UNSAFE verdict)
 - `roam diff` -- blast radius of uncommitted changes
+- `roam diff --staged` -- blast radius of staged changes
 - `roam diff HEAD~3..HEAD` -- blast radius of a commit range
+- `roam diff main..HEAD` -- blast radius of branch commits vs base
 - `roam pr-risk HEAD~3..HEAD` -- PR risk score (0-100) + dead exports + reviewers + change-set novelty
 - `roam owner <path>` -- code ownership (who should review)
 - `roam coupling` -- temporal coupling (hidden dependencies)

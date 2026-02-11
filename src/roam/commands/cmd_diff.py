@@ -48,12 +48,19 @@ def diff_cmd(ctx, commit_range, staged, full):
     root = find_project_root()
 
     changed = _get_changed_files(root, staged, commit_range)
-    label = commit_range or ("staged" if staged else "unstaged")
+    source = "range" if commit_range else ("staged" if staged else "unstaged")
+    label = commit_range or source
+    no_changes_message = (
+        f"No changes found for range {label}."
+        if source == "range"
+        else f"No changes found for {label}."
+    )
     if not changed:
         if json_mode:
             click.echo(to_json(json_envelope(
                 "diff",
-                summary={"label": label, "changed_files": 0},
+                summary={"source": source, "label": label, "changed_files": 0},
+                source=source,
                 label=label,
                 changed_files=0,
                 symbols_defined=0,
@@ -61,10 +68,10 @@ def diff_cmd(ctx, commit_range, staged, full):
                 affected_files=0,
                 per_file=[],
                 blast_radius=[],
-                message=f"No changes found for {label}.",
+                message=no_changes_message,
             )))
         else:
-            click.echo(f"No changes found for {label}.")
+            click.echo(no_changes_message)
         return
 
     with open_db(readonly=True) as conn:
@@ -86,7 +93,8 @@ def diff_cmd(ctx, commit_range, staged, full):
             if json_mode:
                 click.echo(to_json(json_envelope(
                     "diff",
-                    summary={"label": label, "changed_files": 0},
+                    summary={"source": source, "label": label, "changed_files": 0},
+                    source=source,
                     label=label,
                     changed_files=0,
                     symbols_defined=0,
@@ -157,7 +165,8 @@ def diff_cmd(ctx, commit_range, staged, full):
         if json_mode:
             click.echo(to_json(json_envelope(
                 "diff",
-                summary={"label": label, "changed_files": len(file_map)},
+                summary={"source": source, "label": label, "changed_files": len(file_map)},
+                source=source,
                 label=label,
                 changed_files=len(file_map),
                 symbols_defined=total_syms,

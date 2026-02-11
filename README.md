@@ -136,6 +136,7 @@ roam health
 | `roam file <path> [--full]` | File skeleton: all definitions with signatures, no bodies |
 | `roam symbol <name> [--full]` | Symbol definition + callers + callees + metrics. Supports `file:symbol` syntax for disambiguation (e.g., `roam symbol app:Flask`) |
 | `roam context <symbol>` | AI-optimized context: definition + callers + callees + files-to-read with line ranges (PageRank-capped) |
+| `roam coverage-gaps --gate <names> [--scope GLOB]` | Entry-point coverage checker: finds exported functions in scope that do not transitively call gate symbols (auth/logging/validation) |
 | `roam trace <source> <target> [-k N]` | Dependency paths between two symbols with coupling strength and quality scoring. Shows up to k paths (default 3) with edge-kind labels, coupling classification (strong/moderate/weak), hub detection (high-degree intermediates flagged), and path quality ranking. Paths sorted by quality, not just length |
 | `roam deps <path> [--full]` | What a file imports and what imports it |
 | `roam search <pattern> [--kind KIND] [--full]` | Find symbols by name pattern — PageRank-ranked with signatures |
@@ -366,6 +367,7 @@ Run `roam index` once, then use these commands instead of Glob/Grep/Read explora
 - `roam file <path>` -- file skeleton with all definitions
 - `roam symbol <name>` -- definition + callers + callees
 - `roam context <name>` -- AI context: definition + callers + callees + files-to-read with line ranges
+- `roam coverage-gaps --gate requireUser,requireAuth --scope app/routes/**` -- find uncovered entry points missing transitive gate calls
 - `roam deps <path>` -- file import/imported-by graph
 - `roam trace <source> <target>` -- dependency paths with coupling strength, hub detection, quality ranking
 - `roam search <pattern>` -- find symbols by name (PageRank-ranked with signatures)

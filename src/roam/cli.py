@@ -43,6 +43,7 @@ _COMMANDS = {
     "split":       ("roam.commands.cmd_split",      "split"),
     "risk":        ("roam.commands.cmd_risk",       "risk"),
     "why":         ("roam.commands.cmd_why",        "why"),
+    "coverage-gaps": ("roam.commands.cmd_coverage_gaps", "coverage_gaps"),
 }
 
 

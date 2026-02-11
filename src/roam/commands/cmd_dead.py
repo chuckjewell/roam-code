@@ -66,12 +66,37 @@ def _dead_action(r, file_imported):
     return "SAFE"
 
 
+def _group_dead(dead_items, by):
+    groups = {}
+    for item in dead_items:
+        r = item["row"]
+        action = item["action"]
+        if by == "directory":
+            key = os.path.dirname(r["file_path"]).replace("\\", "/") or "."
+        else:
+            key = r["kind"]
+        g = groups.setdefault(key, {"group": key, "count": 0, "safe": 0, "review": 0, "intentional": 0})
+        g["count"] += 1
+        if action == "SAFE":
+            g["safe"] += 1
+        elif action == "REVIEW":
+            g["review"] += 1
+        else:
+            g["intentional"] += 1
+    return sorted(groups.values(), key=lambda x: (-x["count"], x["group"]))
+
+
 @click.command()
 @click.option("--all", "show_all", is_flag=True, help="Include low-confidence results")
+@click.option("--by-directory", is_flag=True, help="Group dead symbols by directory")
+@click.option("--by-kind", is_flag=True, help="Group dead symbols by kind")
+@click.option("--summary", "summary_only", is_flag=True, help="Show only summary counts")
 @click.pass_context
-def dead(ctx, show_all):
+def dead(ctx, show_all, by_directory, by_kind, summary_only):
     """Show unreferenced exported symbols (dead code)."""
     json_mode = ctx.obj.get('json') if ctx.obj else False
+    if by_directory and by_kind:
+        raise click.UsageError("Use only one grouping mode: --by-directory or --by-kind.")
     ensure_index()
     with open_db(readonly=True) as conn:
         rows = conn.execute(UNREFERENCED_EXPORTS).fetchall()
@@ -151,27 +176,47 @@ def dead(ctx, show_all):
                 low.append(r)
 
         # Compute action verdicts for all dead symbols
-        all_dead = [(r, _dead_action(r, r["file_id"] in imported_files)) for r in high + low]
-        n_safe = sum(1 for _, a in all_dead if a == "SAFE")
-        n_review = sum(1 for _, a in all_dead if a == "REVIEW")
-        n_intent = sum(1 for _, a in all_dead if a == "INTENTIONAL")
+        dead_items = []
+        for r in high:
+            dead_items.append({"row": r, "action": _dead_action(r, True), "confidence": "high"})
+        for r in low:
+            dead_items.append({"row": r, "action": _dead_action(r, False), "confidence": "low"})
+
+        n_safe = sum(1 for i in dead_items if i["action"] == "SAFE")
+        n_review = sum(1 for i in dead_items if i["action"] == "REVIEW")
+        n_intent = sum(1 for i in dead_items if i["action"] == "INTENTIONAL")
+        grouping = "directory" if by_directory else ("kind" if by_kind else None)
+        groups = _group_dead(dead_items, grouping) if grouping else []
 
         if json_mode:
-            click.echo(to_json(json_envelope(
-                "dead",
-                summary={"safe": n_safe, "review": n_review, "intentional": n_intent},
-                high_confidence=[
+            payload = {
+                "grouping": grouping or "",
+                "groups": groups,
+                "high_confidence": [
                     {"name": r["name"], "kind": r["kind"],
                      "location": loc(r["file_path"], r["line_start"]),
                      "action": _dead_action(r, True)}
                     for r in high
                 ],
-                low_confidence=[
+                "low_confidence": [
                     {"name": r["name"], "kind": r["kind"],
                      "location": loc(r["file_path"], r["line_start"]),
                      "action": _dead_action(r, False)}
                     for r in low
                 ],
+            }
+            if summary_only:
+                payload["high_confidence"] = []
+                payload["low_confidence"] = []
+            click.echo(to_json(json_envelope(
+                "dead",
+                summary={
+                    "safe": n_safe,
+                    "review": n_review,
+                    "intentional": n_intent,
+                    "total": len(dead_items),
+                },
+                **payload,
             )))
             return
 
@@ -179,6 +224,20 @@ def dead(ctx, show_all):
         click.echo(f"  Actions: {n_safe} safe to delete, {n_review} need review, "
                     f"{n_intent} likely intentional")
         click.echo()
+
+        if summary_only:
+            return
+
+        if grouping:
+            title = "Directory" if grouping == "directory" else "Kind"
+            click.echo(f"=== Dead Code by {title} ===")
+            for g in groups:
+                click.echo(
+                    f"  {g['group']:<30s}  {g['count']:>3d} dead "
+                    f"({g['safe']} SAFE, {g['review']} REVIEW, {g['intentional']} INTENTIONAL)"
+                )
+            click.echo()
+            return
 
         # Build imported-by lookup for high-confidence results
         if high:

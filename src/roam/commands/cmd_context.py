@@ -20,9 +20,9 @@ def _is_test_file(path):
 
 
 @click.command()
-@click.argument('name')
+@click.argument('names', nargs=-1, required=True)
 @click.pass_context
-def context(ctx, name):
+def context(ctx, names):
     """Get the minimal context needed to safely modify a symbol.
 
     Returns definition, callers, callees, tests, and the exact files
@@ -32,6 +32,81 @@ def context(ctx, name):
     ensure_index()
 
     with open_db(readonly=True) as conn:
+        # Batch mode
+        if len(names) > 1:
+            batch = []
+            shared_caller_sets = []
+            files_to_read = set()
+            for name in names:
+                sym = find_symbol(conn, name)
+                if sym is None:
+                    batch.append({"name": name, "error": f"Symbol not found: {name}"})
+                    continue
+                sym_id = sym["id"]
+                callers = conn.execute(
+                    "SELECT s.name, s.kind, f.path as file_path "
+                    "FROM edges e "
+                    "JOIN symbols s ON e.source_id = s.id "
+                    "JOIN files f ON s.file_id = f.id "
+                    "WHERE e.target_id = ? "
+                    "ORDER BY f.path, s.line_start",
+                    (sym_id,),
+                ).fetchall()
+                callees = conn.execute(
+                    "SELECT s.name, s.kind, f.path as file_path "
+                    "FROM edges e "
+                    "JOIN symbols s ON e.target_id = s.id "
+                    "JOIN files f ON s.file_id = f.id "
+                    "WHERE e.source_id = ? "
+                    "ORDER BY f.path, s.line_start",
+                    (sym_id,),
+                ).fetchall()
+
+                caller_names = sorted({c["name"] for c in callers})
+                callee_names = sorted({c["name"] for c in callees})
+                shared_caller_sets.append(set(caller_names))
+
+                files_to_read.add(sym["file_path"])
+                files_to_read.update(c["file_path"] for c in callers[:10])
+                files_to_read.update(c["file_path"] for c in callees[:5])
+
+                batch.append({
+                    "name": sym["qualified_name"] or sym["name"],
+                    "kind": sym["kind"],
+                    "location": loc(sym["file_path"], sym["line_start"]),
+                    "callers": caller_names,
+                    "callees": callee_names,
+                })
+
+            shared_callers = []
+            if shared_caller_sets:
+                shared_callers = sorted(set.intersection(*shared_caller_sets)) if all(shared_caller_sets) else []
+
+            if json_mode:
+                click.echo(to_json({
+                    "symbols": batch,
+                    "shared_callers": shared_callers,
+                    "files_to_read": sorted(files_to_read),
+                }))
+                return
+
+            click.echo(f"=== Batch Context ({len(names)} symbols) ===\n")
+            for item in batch:
+                if item.get("error"):
+                    click.echo(f"{item['error']}\n")
+                    continue
+                click.echo(f"{abbrev_kind(item['kind'])} {item['name']}  {item['location']}")
+                if item["callers"]:
+                    click.echo(f"  called by -> {', '.join(item['callers'][:8])}")
+                if item["callees"]:
+                    click.echo(f"  calls -> {', '.join(item['callees'][:8])}")
+                click.echo()
+
+            click.echo(f"Shared callers: {', '.join(shared_callers) if shared_callers else '(none)'}")
+            click.echo(f"Files to read: {', '.join(sorted(files_to_read)) if files_to_read else '(none)'}")
+            return
+
+        name = names[0]
         sym = find_symbol(conn, name)
         if sym is None:
             click.echo(f"Symbol not found: {name}")

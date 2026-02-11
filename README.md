@@ -135,7 +135,7 @@ roam health
 | `roam module <path>` | Directory contents: exports, signatures, dependencies, cohesion rating |
 | `roam file <path> [--full]` | File skeleton: all definitions with signatures, no bodies |
 | `roam symbol <name> [--full]` | Symbol definition + callers + callees + metrics. Supports `file:symbol` syntax for disambiguation (e.g., `roam symbol app:Flask`) |
-| `roam context <symbol>` | AI-optimized context: definition + callers + callees + files-to-read with line ranges (PageRank-capped) |
+| `roam context <symbol> [symbol2 ...]` | AI-optimized context. Single-symbol mode: definition + callers + callees + files-to-read with line ranges. Multi-symbol mode: combined context with shared callers and deduped files |
 | `roam coverage-gaps --gate <names> [--scope GLOB]` | Entry-point coverage checker: finds exported functions in scope that do not transitively call gate symbols (auth/logging/validation) |
 | `roam trace <source> <target> [-k N]` | Dependency paths between two symbols with coupling strength and quality scoring. Shows up to k paths (default 3) with edge-kind labels, coupling classification (strong/moderate/weak), hub detection (high-degree intermediates flagged), and path quality ranking. Paths sorted by quality, not just length |
 | `roam deps <path> [--full]` | What a file imports and what imports it |
@@ -159,7 +159,7 @@ roam health
 | `roam health [--no-framework]` | Cycles, god components, bottlenecks, layer violations — location-aware severity. Utility paths (composables/, utils/, services/) get relaxed thresholds (3x) for both god components and bottlenecks. Both categorized as "actionable" vs "utility". Cycle severity is directory-aware (single-dir cycles capped at INFO). `--no-framework` filters framework primitives |
 | `roam clusters [--min-size N]` | Community detection vs directory structure — cohesion %, coupling matrices, split suggestions for mega-clusters |
 | `roam layers` | Topological dependency layers + directory breakdown per layer + upward violations |
-| `roam dead [--all]` | Unreferenced exported symbols with SAFE/REVIEW/INTENTIONAL verdicts and reason column. Lifecycle hooks (onMounted, componentDidMount, etc.) auto-classified as INTENTIONAL |
+| `roam dead [--all] [--by-directory\|--by-kind] [--summary]` | Unreferenced exported symbols with SAFE/REVIEW/INTENTIONAL verdicts and reason column. Supports grouped rollups by directory/kind and summary-only mode. Lifecycle hooks (onMounted, componentDidMount, etc.) auto-classified as INTENTIONAL |
 | `roam fan [symbol\|file] [-n N] [--no-framework]` | Fan-in/fan-out: most connected symbols or files (`--no-framework` filters Vue/React primitives) |
 
 ### Git Signals
@@ -366,7 +366,7 @@ Run `roam index` once, then use these commands instead of Glob/Grep/Read explora
 - `roam map` -- project overview, entry points, key symbols
 - `roam file <path>` -- file skeleton with all definitions
 - `roam symbol <name>` -- definition + callers + callees
-- `roam context <name>` -- AI context: definition + callers + callees + files-to-read with line ranges
+- `roam context <name> [name2 ...]` -- AI context for one symbol or a related symbol batch with shared callers/files
 - `roam coverage-gaps --gate requireUser,requireAuth --scope app/routes/**` -- find uncovered entry points missing transitive gate calls
 - `roam deps <path>` -- file import/imported-by graph
 - `roam trace <source> <target>` -- dependency paths with coupling strength, hub detection, quality ranking
@@ -388,7 +388,7 @@ Run `roam index` once, then use these commands instead of Glob/Grep/Read explora
 - `roam coupling` -- temporal coupling (hidden dependencies)
 - `roam coupling --mode set` -- recurring 3+ file change sets from commit hyperedges
 - `roam fan [symbol|file]` -- fan-in/fan-out (`--no-framework` to filter primitives)
-- `roam dead` -- unreferenced exports with SAFE/REVIEW/INTENTIONAL verdicts
+- `roam dead` -- unreferenced exports with SAFE/REVIEW/INTENTIONAL verdicts (`--by-directory`, `--by-kind`, `--summary` for planning)
 - `roam uses <name>` -- all consumers: callers, importers, inheritors
 - `roam clusters` -- code communities with cohesion %, coupling matrices, split suggestions
 - `roam layers` -- dependency layers with directory breakdown

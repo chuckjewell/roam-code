@@ -7,7 +7,7 @@ import sqlite3
 import click
 
 from roam.db.connection import open_db
-from roam.output.formatter import format_table, to_json
+from roam.output.formatter import format_table, to_json, json_envelope
 from roam.commands.resolve import ensure_index
 
 
@@ -36,7 +36,11 @@ def _run_pair_mode(conn, count, json_mode):
 
     if not rows:
         if json_mode:
-            click.echo(to_json({"pairs": []}))
+            click.echo(to_json(json_envelope(
+                "coupling",
+                summary={"mode": "pair", "count": 0},
+                pairs=[],
+            )))
         else:
             click.echo("No co-change data available. Run `roam index` on a git repository.")
         return
@@ -94,7 +98,11 @@ def _run_pair_mode(conn, count, json_mode):
                 "strength": strength_val,
                 "has_structural_edge": has_struct,
             })
-        click.echo(to_json({"pairs": pairs}))
+        click.echo(to_json(json_envelope(
+            "coupling",
+            summary={"mode": "pair", "count": len(pairs)},
+            pairs=pairs,
+        )))
         return
 
     click.echo("=== Temporal coupling (co-change frequency) ===")
@@ -123,14 +131,22 @@ def _run_set_mode(conn, count, json_mode):
         """).fetchall()
     except sqlite3.OperationalError:
         if json_mode:
-            click.echo(to_json({"sets": []}))
+            click.echo(to_json(json_envelope(
+                "coupling",
+                summary={"mode": "set", "count": 0},
+                sets=[],
+            )))
         else:
             click.echo("No change-set data available. Run `roam index` to refresh the index.")
         return
 
     if not rows:
         if json_mode:
-            click.echo(to_json({"sets": []}))
+            click.echo(to_json(json_envelope(
+                "coupling",
+                summary={"mode": "set", "count": 0},
+                sets=[],
+            )))
         else:
             click.echo("No change-set data available. Run `roam index` on a git repository.")
         return
@@ -177,7 +193,11 @@ def _run_set_mode(conn, count, json_mode):
     sets = sets[:count]
 
     if json_mode:
-        click.echo(to_json({"sets": sets}))
+        click.echo(to_json(json_envelope(
+            "coupling",
+            summary={"mode": "set", "count": len(sets)},
+            sets=sets,
+        )))
         return
 
     click.echo("=== Temporal coupling (recurring change sets) ===")

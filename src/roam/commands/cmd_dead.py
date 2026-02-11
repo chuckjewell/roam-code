@@ -6,7 +6,9 @@ import click
 
 from roam.db.connection import open_db
 from roam.db.queries import UNREFERENCED_EXPORTS
-from roam.output.formatter import abbrev_kind, loc, format_table, to_json
+from roam.output.formatter import (
+    abbrev_kind, loc, format_table, to_json, json_envelope,
+)
 from roam.commands.resolve import ensure_index
 
 
@@ -76,7 +78,12 @@ def dead(ctx, show_all):
 
         if not rows:
             if json_mode:
-                click.echo(to_json({"high_confidence": [], "low_confidence": []}))
+                click.echo(to_json(json_envelope(
+                    "dead",
+                    summary={"safe": 0, "review": 0, "intentional": 0},
+                    high_confidence=[],
+                    low_confidence=[],
+                )))
             else:
                 click.echo("=== Unreferenced Exports (0) ===")
                 click.echo("  (none -- all exports are referenced)")
@@ -150,21 +157,22 @@ def dead(ctx, show_all):
         n_intent = sum(1 for _, a in all_dead if a == "INTENTIONAL")
 
         if json_mode:
-            click.echo(to_json({
-                "summary": {"safe": n_safe, "review": n_review, "intentional": n_intent},
-                "high_confidence": [
+            click.echo(to_json(json_envelope(
+                "dead",
+                summary={"safe": n_safe, "review": n_review, "intentional": n_intent},
+                high_confidence=[
                     {"name": r["name"], "kind": r["kind"],
                      "location": loc(r["file_path"], r["line_start"]),
                      "action": _dead_action(r, True)}
                     for r in high
                 ],
-                "low_confidence": [
+                low_confidence=[
                     {"name": r["name"], "kind": r["kind"],
                      "location": loc(r["file_path"], r["line_start"]),
                      "action": _dead_action(r, False)}
                     for r in low
                 ],
-            }))
+            )))
             return
 
         click.echo(f"=== Unreferenced Exports ({len(high)} high confidence, {len(low)} low) ===")

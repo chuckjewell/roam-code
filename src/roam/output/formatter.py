@@ -1,5 +1,6 @@
 """Token-efficient text formatting for AI consumption."""
 
+from datetime import datetime, timezone
 import json as _json
 
 KIND_ABBREV = {
@@ -104,6 +105,18 @@ def format_table(headers: list[str], rows: list[list[str]],
 def to_json(data) -> str:
     """Serialize data to a JSON string."""
     return _json.dumps(data, indent=2, default=str)
+
+
+def json_envelope(command: str, summary: dict | None = None, **payload) -> dict:
+    """Wrap a command payload with a stable top-level JSON envelope."""
+    ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    out = {
+        "command": command,
+        "timestamp": ts,
+        "summary": summary or {},
+    }
+    out.update(payload)
+    return out
 
 
 def table_to_dicts(headers: list[str], rows: list[list[str]]) -> list[dict]:

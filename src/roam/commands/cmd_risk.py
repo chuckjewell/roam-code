@@ -7,7 +7,9 @@ import re
 import click
 
 from roam.db.connection import open_db
-from roam.output.formatter import abbrev_kind, loc, format_table, to_json
+from roam.output.formatter import (
+    abbrev_kind, loc, format_table, to_json, json_envelope,
+)
 from roam.commands.resolve import ensure_index
 
 
@@ -233,7 +235,11 @@ def risk(ctx, count, domain_keywords):
 
         if not rows:
             if json_mode:
-                click.echo(to_json({"items": []}))
+                click.echo(to_json(json_envelope(
+                    "risk",
+                    summary={"count": 0},
+                    items=[],
+                )))
             else:
                 click.echo("No graph metrics available. Run `roam index` first.")
             return
@@ -315,8 +321,10 @@ def risk(ctx, count, domain_keywords):
         scored = scored[:count]
 
         if json_mode:
-            click.echo(to_json({
-                "items": [
+            click.echo(to_json(json_envelope(
+                "risk",
+                summary={"count": len(scored)},
+                items=[
                     {
                         "name": s["name"],
                         "kind": s["kind"],
@@ -330,7 +338,7 @@ def risk(ctx, count, domain_keywords):
                     }
                     for s in scored
                 ],
-            }))
+            )))
             return
 
         # --- Text output ---

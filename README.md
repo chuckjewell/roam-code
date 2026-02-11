@@ -182,6 +182,11 @@ roam health
 | `roam --json <command>` | Output structured JSON instead of human-readable tables. Works on all 29 commands. |
 | `roam --version` | Show version |
 
+All JSON outputs use a stable top-level envelope:
+- `command`: command name (e.g., `dead`, `health`, `pr-risk`)
+- `timestamp`: UTC ISO-8601 timestamp
+- `summary`: compact command summary for quick automation checks
+
 ```bash
 # Examples
 roam --json health          # {"cycles": [...], "god_components": [...], "actionable_count": 5, ...}

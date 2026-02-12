@@ -1,5 +1,7 @@
 """SQLite connection management with WAL mode and performance pragmas."""
 
+from __future__ import annotations
+
 import sqlite3
 import os
 from pathlib import Path
@@ -36,7 +38,7 @@ def get_connection(db_path: Path | None = None, readonly: bool = False) -> sqlit
         db_path = get_db_path()
 
     if readonly:
-        uri = f"file:{db_path}?mode=ro"
+        uri = db_path.as_uri() + "?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=30)
     else:
         conn = sqlite3.connect(str(db_path), timeout=30)
@@ -55,10 +57,81 @@ def ensure_schema(conn: sqlite3.Connection):
     conn.executescript(SCHEMA_SQL)
 
     # Migrations for columns added after initial schema
+    _safe_alter(conn, "symbols", "default_value", "TEXT")
+    _safe_alter(conn, "file_stats", "health_score", "REAL")
+    _safe_alter(conn, "file_stats", "cochange_entropy", "REAL")
+    _safe_alter(conn, "file_stats", "cognitive_load", "REAL")
+    _safe_alter(conn, "snapshots", "tangle_ratio", "REAL")
+    _safe_alter(conn, "snapshots", "avg_complexity", "REAL")
+    _safe_alter(conn, "snapshots", "brain_methods", "INTEGER")
+
+
+def _safe_alter(conn: sqlite3.Connection, table: str, column: str, col_type: str):
+    """Add a column to a table if it doesn't exist."""
     try:
-        conn.execute("ALTER TABLE symbols ADD COLUMN default_value TEXT")
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
     except sqlite3.OperationalError:
         pass  # Column already exists
+
+
+# ---------------------------------------------------------------------------
+# Batched IN-clause helpers — avoid SQLITE_MAX_VARIABLE_NUMBER (default 999)
+# ---------------------------------------------------------------------------
+
+_BATCH_SIZE = 400  # conservative — leaves room for extra params
+
+
+def batched_in(conn, sql, ids, *, pre=(), post=(), batch_size=_BATCH_SIZE):
+    """Execute *sql* with ``{ph}`` placeholder(s) in batches.
+
+    Handles single and double IN-clauses automatically::
+
+        # Single IN
+        batched_in(conn, "SELECT * FROM t WHERE id IN ({ph})", ids)
+
+        # Double IN (same set)
+        batched_in(conn, "... WHERE src IN ({ph}) AND tgt IN ({ph})", ids)
+
+        # Extra params before / after
+        batched_in(conn, "... WHERE kind=? AND id IN ({ph})", ids, pre=[kind])
+
+    Returns a flat list of all rows across batches.
+    """
+    if not ids:
+        return []
+    ids = list(ids)
+    n_ph = sql.count("{ph}")
+    chunk = max(1, batch_size // max(n_ph, 1))
+
+    rows = []
+    for i in range(0, len(ids), chunk):
+        batch = ids[i:i + chunk]
+        ph = ",".join("?" for _ in batch)
+        q = sql.replace("{ph}", ph)
+        params = list(pre) + batch * n_ph + list(post)
+        rows.extend(conn.execute(q, params).fetchall())
+    return rows
+
+
+def batched_count(conn, sql, ids, *, pre=(), post=(), batch_size=_BATCH_SIZE):
+    """Like :func:`batched_in` but **sums** scalar results (for COUNT queries).
+
+    Returns an integer total.
+    """
+    if not ids:
+        return 0
+    ids = list(ids)
+    n_ph = sql.count("{ph}")
+    chunk = max(1, batch_size // max(n_ph, 1))
+
+    total = 0
+    for i in range(0, len(ids), chunk):
+        batch = ids[i:i + chunk]
+        ph = ",".join("?" for _ in batch)
+        q = sql.replace("{ph}", ph)
+        params = list(pre) + batch * n_ph + list(post)
+        total += conn.execute(q, params).fetchone()[0]
+    return total
 
 
 def db_exists(project_root: Path | None = None) -> bool:

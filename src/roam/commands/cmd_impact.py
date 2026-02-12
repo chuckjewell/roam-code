@@ -1,9 +1,11 @@
 """Show blast radius: what breaks if a symbol changes."""
 
+from __future__ import annotations
+
 import click
 
 from roam.db.connection import open_db
-from roam.output.formatter import abbrev_kind, loc, format_table, to_json
+from roam.output.formatter import abbrev_kind, loc, format_table, to_json, json_envelope
 from roam.commands.resolve import ensure_index, find_symbol
 
 
@@ -47,11 +49,12 @@ def impact(ctx, name):
 
         if not dependents:
             if json_mode:
-                click.echo(to_json({
-                    "symbol": sym["qualified_name"] or sym["name"],
-                    "affected_symbols": 0, "affected_files": 0,
-                    "direct_dependents": {}, "affected_file_list": [],
-                }))
+                click.echo(to_json(json_envelope("impact",
+                    summary={"affected_symbols": 0, "affected_files": 0},
+                    symbol=sym["qualified_name"] or sym["name"],
+                    affected_symbols=0, affected_files=0,
+                    direct_dependents={}, affected_file_list=[],
+                )))
             else:
                 click.echo("No dependents found.")
             return
@@ -74,6 +77,31 @@ def impact(ctx, name):
                     loc(node.get("file_path", "?"), None),
                 ])
 
+        # Convention-based Salesforce test discovery: NameTest.cls, Name_Test.cls
+        sf_test_files = set()
+        for dep_id in dependents | {sym_id}:
+            node = G.nodes.get(dep_id, {})
+            dep_name = node.get("name", "")
+            if dep_name:
+                conv_tests = conn.execute(
+                    "SELECT f.path FROM symbols s "
+                    "JOIN files f ON s.file_id = f.id "
+                    "WHERE (s.name = ? OR s.name = ?) AND s.kind = 'class'",
+                    (f"{dep_name}Test", f"{dep_name}_Test"),
+                ).fetchall()
+                for ct in conv_tests:
+                    sf_test_files.add(ct["path"])
+
+        # Verdict
+        if len(dependents) >= 50:
+            verdict = f"Large blast radius — {len(dependents)} symbols in {len(affected_files)} files affected"
+        elif len(dependents) >= 10:
+            verdict = f"Moderate blast radius — {len(dependents)} symbols in {len(affected_files)} files affected"
+        elif len(dependents) > 0:
+            verdict = f"Small blast radius — {len(dependents)} symbols in {len(affected_files)} files affected"
+        else:
+            verdict = "No dependents — safe to change"
+
         if json_mode:
             json_deps = {}
             for edge_kind, items in by_kind.items():
@@ -81,15 +109,23 @@ def impact(ctx, name):
                     {"name": i[1], "kind": i[0], "file": i[2]}
                     for i in items
                 ]
-            click.echo(to_json({
-                "symbol": sym["qualified_name"] or sym["name"],
-                "affected_symbols": len(dependents),
-                "affected_files": len(affected_files),
-                "direct_dependents": json_deps,
-                "affected_file_list": sorted(affected_files),
-            }))
+            click.echo(to_json(json_envelope("impact",
+                summary={
+                    "verdict": verdict,
+                    "affected_symbols": len(dependents),
+                    "affected_files": len(affected_files),
+                    "sf_convention_tests": len(sf_test_files),
+                },
+                symbol=sym["qualified_name"] or sym["name"],
+                affected_symbols=len(dependents),
+                affected_files=len(affected_files),
+                direct_dependents=json_deps,
+                affected_file_list=sorted(affected_files),
+                sf_convention_tests=sorted(sf_test_files),
+            )))
             return
 
+        click.echo(f"VERDICT: {verdict}\n")
         click.echo(f"Affected symbols: {len(dependents)}  Affected files: {len(affected_files)}")
         click.echo()
 
@@ -109,3 +145,9 @@ def impact(ctx, name):
                 click.echo(f"  {fp}")
             if len(affected_files) > 20:
                 click.echo(f"  (+{len(affected_files) - 20} more)")
+
+        # List Salesforce convention-based test files
+        if sf_test_files:
+            click.echo(f"\nSalesforce convention tests ({len(sf_test_files)}):")
+            for tf in sorted(sf_test_files):
+                click.echo(f"  {tf}")

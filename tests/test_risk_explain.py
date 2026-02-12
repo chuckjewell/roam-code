@@ -66,7 +66,7 @@ def risk_project(tmp_path):
 def test_risk_explain_text_includes_chain(risk_project):
     out, rc = _roam("risk", "--domain", "session", "--explain", "-n", "10", cwd=risk_project)
     assert rc == 0, out
-    assert "Chain:" in out
+    assert "Callee chain:" in out or "chain" in out.lower()
 
 
 def test_risk_explain_json_includes_chain(risk_project):

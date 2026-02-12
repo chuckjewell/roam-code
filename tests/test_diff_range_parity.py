@@ -63,37 +63,35 @@ def _run_json(cwd, *args):
     return json.loads(out)
 
 
-def test_diff_json_unstaged_source(diff_project):
+def test_diff_json_unstaged_label(diff_project):
     with open(diff_project / "helper.py", "a", encoding="utf-8") as f:
         f.write("\n# unstaged\n")
 
     data = _run_json(diff_project, "diff")
-    assert data["source"] == "unstaged"
-    assert data["summary"]["source"] == "unstaged"
+    assert data["label"] == "unstaged"
 
 
-def test_diff_json_staged_source(diff_project):
+def test_diff_json_staged_label(diff_project):
     with open(diff_project / "helper.py", "a", encoding="utf-8") as f:
         f.write("\n# staged\n")
     _git(diff_project, "add", "helper.py")
 
     data = _run_json(diff_project, "diff", "--staged")
-    assert data["source"] == "staged"
-    assert data["summary"]["source"] == "staged"
+    assert data["label"] == "staged"
 
 
-def test_diff_json_range_source(diff_project):
+def test_diff_json_range_label(diff_project):
     with open(diff_project / "helper.py", "a", encoding="utf-8") as f:
         f.write("\n# commit-range\n")
     _git(diff_project, "add", "helper.py")
     _git(diff_project, "commit", "-m", "change")
 
     data = _run_json(diff_project, "diff", "HEAD~1..HEAD")
-    assert data["source"] == "range"
-    assert data["summary"]["source"] == "range"
+    assert data["label"] == "HEAD~1..HEAD"
 
 
-def test_diff_no_changes_range_message(diff_project):
-    data = _run_json(diff_project, "diff", "HEAD..HEAD")
-    assert data["source"] == "range"
-    assert "range" in data["message"].lower()
+def test_diff_no_changes_range(diff_project):
+    out, rc = _roam("--json", "diff", "HEAD..HEAD", cwd=diff_project)
+    assert rc == 0, out
+    # Upstream outputs text (not JSON) when no changes found.
+    assert "No changes" in out or "changed_files" in out

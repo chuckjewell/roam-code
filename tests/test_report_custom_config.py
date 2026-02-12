@@ -48,10 +48,13 @@ def custom_report_project(tmp_path):
     assert rc == 0, out
 
     cfg = {
-        "mini": [
-            {"title": "Overview", "command": ["map"]},
-            {"title": "Health", "command": ["health"]}
-        ]
+        "mini": {
+            "description": "Minimal report",
+            "sections": [
+                {"title": "Overview", "command": ["map"]},
+                {"title": "Health", "command": ["health"]}
+            ]
+        }
     }
     (root / "reports.json").write_text(json.dumps(cfg))
     return root

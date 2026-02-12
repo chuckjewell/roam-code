@@ -11,7 +11,6 @@ Covers:
 """
 
 import subprocess
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -1994,9 +1993,6 @@ class TestPrRisk:
         assert "risk_score" in data
         assert isinstance(data["risk_score"], int)
         assert "risk_level" in data
-        assert "hypergraph_novelty_score" in data
-        assert "historical_pattern_support" in data
-        assert 0 <= data["hypergraph_novelty_score"] <= 1
 
     def test_pr_risk_staged(self, pr_project):
         """roam pr-risk --staged should analyze staged changes."""
@@ -2032,61 +2028,6 @@ class TestPrRisk:
         """roam pr-risk --help should work."""
         out, rc = roam("pr-risk", "--help")
         assert rc == 0
-
-
-class TestHypergraphCoupling:
-    @pytest.fixture
-    def coupling_set_project(self, tmp_path):
-        """Project with recurring multi-file commits for set-mode coupling."""
-        proj = tmp_path / "coupling_set_test"
-        proj.mkdir()
-        (proj / "a.py").write_text('def a():\n    return 1\n')
-        (proj / "b.py").write_text('def b():\n    return 2\n')
-        (proj / "c.py").write_text('def c():\n    return 3\n')
-        (proj / "d.py").write_text('def d():\n    return 4\n')
-        git_init(proj)
-
-        # Create recurring 3-file pattern (a,b,c) plus one variant.
-        change_sets = [
-            ("a.py", "b.py", "c.py"),
-            ("a.py", "b.py", "c.py"),
-            ("a.py", "b.py", "d.py"),
-        ]
-        for i, names in enumerate(change_sets):
-            for name in names:
-                with open(proj / name, "a", encoding="utf-8") as f:
-                    f.write(f"\n# change {i}\n")
-            git_commit(proj, f"change-set-{i}")
-
-        roam("index", "--force", cwd=proj)
-        return proj
-
-    def test_hyperedge_tables_populated(self, coupling_set_project):
-        """Indexing should persist commit hyperedges and members."""
-        db_path = coupling_set_project / ".roam" / "index.db"
-        conn = sqlite3.connect(str(db_path))
-        try:
-            h_count = conn.execute("SELECT COUNT(*) FROM git_hyperedges").fetchone()[0]
-            m_count = conn.execute("SELECT COUNT(*) FROM git_hyperedge_members").fetchone()[0]
-        finally:
-            conn.close()
-
-        assert h_count > 0
-        assert m_count > 0
-
-    def test_coupling_set_mode_json(self, coupling_set_project):
-        """Set mode should surface recurring 3+ file change-sets."""
-        import json
-
-        out, rc = roam("--json", "coupling", "--mode", "set", "-n", "10", cwd=coupling_set_project)
-        assert rc == 0
-        data = json.loads(out)
-        assert "sets" in data
-        assert isinstance(data["sets"], list)
-        assert any(
-            set(item["files"]) == {"a.py", "b.py", "c.py"} and item["occurrences"] >= 2
-            for item in data["sets"]
-        )
 
 
 class TestWhy:

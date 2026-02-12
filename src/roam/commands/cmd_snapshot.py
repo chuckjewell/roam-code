@@ -1,34 +1,43 @@
-"""Persist a structural health snapshot to .roam/history.json."""
+"""Persist a health metrics snapshot."""
 
 import click
 
-from roam.commands.metrics_history import append_history
+from roam.db.connection import open_db
+from roam.output.formatter import to_json, json_envelope
 from roam.commands.resolve import ensure_index
-from roam.db.connection import find_project_root, open_db
-from roam.output.formatter import json_envelope, to_json
+from roam.commands.metrics_history import append_snapshot
 
 
-@click.command("snapshot")
-@click.option("--tag", default="", help="Optional snapshot tag (e.g. v2.1-release)")
+@click.command()
+@click.option("--tag", default=None, help="Label for this snapshot (e.g. 'v2.1', 'pre-refactor')")
 @click.pass_context
 def snapshot(ctx, tag):
-    """Save a structural snapshot to history."""
-    json_mode = ctx.obj.get("json") if ctx.obj else False
-    ensure_index()
-    root = find_project_root()
+    """Save a snapshot of current health metrics.
 
-    with open_db(readonly=True) as conn:
-        entry = append_history(root, conn, tag=tag, source="snapshot")
+    Snapshots are stored in the index DB and can be viewed with `roam trend`.
+    Use --tag to label important milestones.
+    """
+    json_mode = ctx.obj.get('json') if ctx.obj else False
+    ensure_index()
+
+    with open_db() as conn:
+        result = append_snapshot(conn, tag=tag, source="snapshot")
 
     if json_mode:
-        click.echo(to_json(json_envelope(
-            "snapshot",
-            summary={"tag": entry.get("tag", ""), "files": entry["metrics"]["files"]},
-            entry=entry,
+        click.echo(to_json(json_envelope("snapshot",
+            summary={
+                "health_score": result["health_score"],
+                "tag": tag,
+            },
+            **result,
         )))
-        return
-
-    click.echo("Snapshot saved.")
-    click.echo(f"  tag: {entry.get('tag') or '(none)'}")
-    click.echo(f"  commit: {entry.get('commit') or '(none)'}  branch: {entry.get('branch') or '(none)'}")
-    click.echo(f"  files: {entry['metrics']['files']}  symbols: {entry['metrics']['symbols']}  edges: {entry['metrics']['edges']}")
+    else:
+        tag_str = f" [{tag}]" if tag else ""
+        click.echo(f"Snapshot saved{tag_str}")
+        click.echo(f"  Health: {result['health_score']}/100")
+        click.echo(f"  Files: {result['files']}  Symbols: {result['symbols']}  Edges: {result['edges']}")
+        click.echo(f"  Cycles: {result['cycles']}  God: {result['god_components']}  "
+                    f"Bottlenecks: {result['bottlenecks']}  Dead: {result['dead_exports']}  "
+                    f"Violations: {result['layer_violations']}")
+        if result.get("git_branch"):
+            click.echo(f"  Branch: {result['git_branch']}  Commit: {result.get('git_commit', '?')}")

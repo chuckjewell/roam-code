@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roam-code"
-version = "4.3.1"
+version = "7.2.0"
 description = "Instant codebase comprehension for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -34,8 +34,6 @@ dependencies = [
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.6",
     "networkx>=3.0",
-    "numpy>=1.26",
-    "scipy>=1.8",
 ]
 
 [project.urls]

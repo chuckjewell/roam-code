@@ -1,110 +1,269 @@
-"""Run built-in or custom compound workflows as a single report."""
+"""Run compound report presets — multiple commands in one shot."""
 
 import json
+import subprocess
+import sys
+import time
 
 import click
 
-from roam.commands.report_presets import PRESETS
-from roam.commands.report_runner import run_section
 from roam.db.connection import find_project_root
-from roam.output.formatter import json_envelope, to_json
+from roam.output.formatter import to_json, json_envelope
+from roam.commands.resolve import ensure_index
+
+
+# ---------------------------------------------------------------------------
+# Built-in presets
+# ---------------------------------------------------------------------------
+
+PRESETS = {
+    "first-contact": {
+        "description": "Initial codebase overview — map, health, weather, layers, coupling",
+        "sections": [
+            {"title": "Map", "command": ["map"]},
+            {"title": "Health", "command": ["health"]},
+            {"title": "Weather", "command": ["weather"]},
+            {"title": "Layers", "command": ["layers"]},
+            {"title": "Coupling", "command": ["coupling"]},
+        ],
+    },
+    "security": {
+        "description": "Security audit — risk analysis, coverage gaps, secret scan",
+        "sections": [
+            {"title": "Risk", "command": ["risk", "-n", "20"]},
+            {"title": "Coverage Gaps", "command": ["coverage-gaps", "--gate-pattern", "auth|permission|guard"]},
+            {"title": "Secret Scan", "command": ["grep", "password|secret|token|api.key", "--source-only", "-n", "30"]},
+        ],
+    },
+    "pre-pr": {
+        "description": "Pre-PR checklist — risk, blast radius, coupling check",
+        "sections": [
+            {"title": "PR Risk", "command": ["pr-risk", "--staged"]},
+            {"title": "Blast Radius", "command": ["diff", "--staged"]},
+            {"title": "Coupling Check", "command": ["coupling"]},
+        ],
+    },
+    "refactor": {
+        "description": "Refactoring analysis — weather, dead code, fan analysis, health",
+        "sections": [
+            {"title": "Weather", "command": ["weather"]},
+            {"title": "Dead Code", "command": ["dead", "--summary"]},
+            {"title": "Fan Analysis", "command": ["fan"]},
+            {"title": "Health", "command": ["health"]},
+        ],
+    },
+}
 
 
 def _load_custom_presets(config_path: str) -> dict:
-    if not config_path:
-        return {}
-    try:
-        with open(config_path, encoding="utf-8") as f:
+    """Load custom report presets from a JSON file.
+
+    Expected format:
+    {
+        "my-preset": {
+            "description": "My custom report",
+            "sections": [
+                {"title": "Health Check", "command": ["health"]},
+                {"title": "Risk Analysis", "command": ["risk", "-n", "20"]}
+            ]
+        }
+    }
+    """
+    with open(config_path) as f:
+        try:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
+        except json.JSONDecodeError as exc:
+            raise click.BadParameter(f"Invalid JSON in config file: {exc}")
+
     if not isinstance(data, dict):
-        return {}
-    out = {}
-    for name, sections in data.items():
-        if not isinstance(sections, list):
+        raise click.BadParameter(f"Config must be a JSON object, got {type(data).__name__}")
+
+    for name, preset in data.items():
+        if "sections" not in preset:
+            raise click.BadParameter(f"Preset '{name}' missing 'sections' key")
+        if not isinstance(preset["sections"], list):
+            raise click.BadParameter(f"Preset '{name}' sections must be a list")
+        for i, section in enumerate(preset["sections"]):
+            if "title" not in section or "command" not in section:
+                raise click.BadParameter(
+                    f"Preset '{name}' section {i} needs 'title' and 'command' keys"
+                )
+        # Add default description if missing
+        if "description" not in preset:
+            preset["description"] = f"Custom preset: {name}"
+
+    return data
+
+
+def _run_section(section, root):
+    """Run a single report section as a subprocess.
+
+    Returns (title, success, output_data, stderr).
+    """
+    cmd = [sys.executable, "-m", "roam", "--json"] + section["command"]
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(root), capture_output=True, text=True,
+            timeout=180, encoding="utf-8", errors="replace",
+        )
+        output = result.stdout.strip()
+        try:
+            data = json.loads(output) if output else None
+        except json.JSONDecodeError:
+            data = {"raw": output}
+
+        return (
+            section["title"],
+            result.returncode == 0,
+            data,
+            result.stderr.strip() if result.returncode != 0 else "",
+        )
+    except subprocess.TimeoutExpired:
+        return (section["title"], False, None, "timeout (180s)")
+    except Exception as e:
+        return (section["title"], False, None, str(e))
+
+
+def _format_markdown(preset_name, results):
+    """Format results as GitHub-compatible markdown."""
+    lines = [f"## Roam Report: {preset_name}\n"]
+
+    for title, success, data, stderr in results:
+        status = "pass" if success else "FAIL"
+        lines.append(f"### {title} [{status}]")
+
+        if not success:
+            lines.append(f"\n> Error: {stderr}\n")
             continue
-        cleaned = []
-        for s in sections:
-            if not isinstance(s, dict):
-                continue
-            title = s.get("title")
-            command = s.get("command")
-            if isinstance(title, str) and isinstance(command, list) and all(isinstance(x, str) for x in command):
-                cleaned.append({"title": title, "command": command})
-        if cleaned:
-            out[str(name)] = cleaned
-    return out
+
+        if data and isinstance(data, dict):
+            summary = data.get("summary", {})
+            if summary:
+                parts = [f"**{k}**: {v}" for k, v in summary.items()]
+                lines.append(", ".join(parts))
+            lines.append("")
+            lines.append("<details><summary>Full output</summary>\n")
+            lines.append("```json")
+            lines.append(json.dumps(data, indent=2, default=str)[:2000])
+            lines.append("```")
+            lines.append("</details>\n")
+        else:
+            lines.append("_(no data)_\n")
+
+    return "\n".join(lines)
 
 
-@click.command("report")
-@click.argument("preset", required=False)
-@click.option("--config", "config_path", default="", help="JSON file with custom report presets")
-@click.option("--list", "list_presets", is_flag=True, help="List available report presets")
-@click.option("--strict", is_flag=True, help="Fail if any section fails")
+@click.command()
+@click.argument("preset", required=False, default=None)
+@click.option("--list", "list_presets", is_flag=True, help="List available presets")
+@click.option("--strict", is_flag=True, help="Exit non-zero if any section fails")
+@click.option("--md", "markdown", is_flag=True, help="Output GitHub-compatible markdown")
+@click.option("--config", "config_path", type=click.Path(exists=True),
+              help="Load custom presets from a JSON file")
 @click.pass_context
-def report(ctx, preset, config_path, list_presets, strict):
-    """Run a compound report preset and summarize section results."""
-    json_mode = ctx.obj.get("json") if ctx.obj else False
-    root = find_project_root()
-    custom = _load_custom_presets(config_path)
-    presets = dict(PRESETS)
-    presets.update(custom)
+def report(ctx, preset, list_presets, strict, markdown, config_path):
+    """Run a compound report preset — multiple commands in one shot.
+
+    Built-in presets: first-contact, security, pre-pr, refactor.
+    """
+    json_mode = ctx.obj.get('json') if ctx.obj else False
+
+    all_presets = dict(PRESETS)  # copy built-in
+    if config_path:
+        custom = _load_custom_presets(config_path)
+        all_presets.update(custom)
 
     if list_presets:
-        names = sorted(presets.keys())
         if json_mode:
-            click.echo(to_json(json_envelope("report", summary={"count": len(names)}, presets=names)))
+            click.echo(to_json(json_envelope("report",
+                summary={"presets": len(all_presets)},
+                presets={name: p["description"] for name, p in all_presets.items()},
+            )))
         else:
-            click.echo("Available report presets:")
-            for n in names:
-                click.echo(f"  {n}")
+            click.echo("=== Available Report Presets ===\n")
+            for name, p in all_presets.items():
+                sections = ", ".join(s["title"] for s in p["sections"])
+                click.echo(f"  {name:<16s}  {p['description']}")
+                click.echo(f"    sections: {sections}")
         return
 
     if not preset:
-        raise click.UsageError("Provide a preset name or use --list.")
+        click.echo("Usage: roam report <preset>")
+        click.echo("Available presets: " + ", ".join(all_presets.keys()))
+        click.echo("Use --list for details.")
+        raise SystemExit(1)
 
-    if preset not in presets:
-        raise click.UsageError(f"Unknown preset: {preset}")
+    if preset not in all_presets:
+        click.echo(f"Unknown preset: {preset}")
+        click.echo("Available: " + ", ".join(all_presets.keys()))
+        raise SystemExit(1)
 
-    sections = presets[preset]
+    ensure_index()
+    root = find_project_root()
+    preset_data = all_presets[preset]
+    t0 = time.monotonic()
+
     results = []
-    failed = 0
-    for sec in sections:
-        run = run_section(sec["command"], str(root))
-        status = "ok" if run["ok"] else "failed"
-        if status == "failed":
-            failed += 1
-        results.append({
-            "title": sec["title"],
-            "command": sec["command"],
-            "status": status,
-            "error": (run["stderr"] or "").strip() if status == "failed" else "",
-            "data": run["payload"] if run["ok"] else None,
-        })
+    for section in preset_data["sections"]:
+        title, success, data, stderr = _run_section(section, root)
+        results.append((title, success, data, stderr))
 
-    summary = {
-        "sections": len(results),
-        "failed": failed,
-        "ok": len(results) - failed,
-    }
+    elapsed = time.monotonic() - t0
+    ok_count = sum(1 for _, s, _, _ in results if s)
+    fail_count = sum(1 for _, s, _, _ in results if not s)
 
-    if json_mode:
-        click.echo(to_json(json_envelope(
-            "report",
-            summary=summary,
-            preset=preset,
-            sections=results,
-        )))
-        if strict and failed:
+    if markdown:
+        click.echo(_format_markdown(preset, results))
+        if strict and fail_count > 0:
             raise SystemExit(1)
         return
 
-    click.echo(f"Report: {preset}")
-    click.echo(f"Sections: {len(results)}  OK: {summary['ok']}  Failed: {summary['failed']}")
-    for r in results:
-        click.echo(f"  [{r['status']}] {r['title']}  ({' '.join(r['command'])})")
-        if r["status"] == "failed" and r["error"]:
-            click.echo(f"    {r['error'].splitlines()[0]}")
-    if strict and failed:
+    if json_mode:
+        click.echo(to_json(json_envelope("report",
+            summary={
+                "preset": preset,
+                "sections_ok": ok_count,
+                "sections_failed": fail_count,
+                "elapsed_s": round(elapsed, 1),
+            },
+            preset=preset,
+            sections=[
+                {
+                    "title": title,
+                    "success": success,
+                    "data": data,
+                    "error": stderr if not success else None,
+                }
+                for title, success, data, stderr in results
+            ],
+        )))
+        if strict and fail_count > 0:
+            raise SystemExit(1)
+        return
+
+    # --- Text output ---
+    click.echo(f"=== Report: {preset} ({ok_count}/{len(results)} OK, {elapsed:.1f}s) ===\n")
+
+    for title, success, data, stderr in results:
+        status = "OK" if success else "FAIL"
+        click.echo(f"--- {title} [{status}] ---")
+
+        if not success:
+            click.echo(f"  Error: {stderr}")
+            click.echo()
+            continue
+
+        if data and isinstance(data, dict):
+            summary = data.get("summary", {})
+            if summary:
+                parts = [f"{k}={v}" for k, v in summary.items()]
+                click.echo(f"  {', '.join(parts)}")
+            else:
+                click.echo("  (completed)")
+        else:
+            click.echo("  (completed)")
+        click.echo()
+
+    if strict and fail_count > 0:
+        click.echo(f"\nSTRICT: {fail_count} section(s) failed.")
         raise SystemExit(1)

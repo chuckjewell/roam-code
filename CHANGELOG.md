@@ -1,0 +1,228 @@
+# Changelog
+
+## v7.2.0
+
+AI agent experience, new analysis commands, and deeper per-file metrics.
+
+### New Commands
+
+- **`roam tour [--write PATH]`** — Auto-generated onboarding guide: top symbols by PageRank with role labels (Hub/Core utility/Orchestrator/Leaf), suggested file reading order based on topological layers, entry points, language breakdown, and codebase statistics. `--write` saves to Markdown.
+- **`roam diagnose <symbol> [--depth N]`** — Root cause analysis for debugging. Given a failing symbol, walks upstream callers and downstream callees up to N hops, ranks suspects by a composite risk score combining git churn (30%), cognitive complexity (30%), file health (25%), and co-change entropy (15%). Shows co-change partners and recent git history.
+
+### Cognitive Load Index
+
+- **Per-file cognitive load (0-100)** — New metric stored in `file_stats.cognitive_load`. Combines max cognitive complexity (30%), avg nesting depth (15%), dependency surface area (20%), co-change entropy (15%), dead export ratio (10%), and file size (10%). Surfaced in `roam file` output (both text and JSON).
+
+### Trend-Based Fitness Rules
+
+- **`type: trend` fitness rules** — New rule type in `.roam/fitness.yaml` that compares snapshot metrics over a configurable window. Guards against regressions: `max_decrease: 5` fails if health_score dropped more than 5 from the window average, `max_increase: 3` fails if cycles grew by more than 3. Supports all snapshot metrics (health_score, tangle_ratio, avg_complexity, cycles, etc.).
+
+### Agent Experience
+
+- **Verdict-first output** — Key commands (`health`, `preflight`, `pr-risk`, `impact`, `diagnose`) now emit a one-line VERDICT as the first line of text output and include a `verdict` field in the JSON summary. Agents can stop reading after the first line for quick decisions.
+- **Engineered MCP tool descriptions** — All 16 MCP tool descriptions rewritten with "WHEN TO USE" guidance, "Do NOT call X if Y covers your need" hints, and expected output descriptions. Based on Anthropic's research that tool descriptions are prompts.
+- **MCP tools for tour + diagnose** — 2 new MCP tools (`tour`, `diagnose`). Total: 16 tools, 2 resources.
+
+### PR Risk Enhancement
+
+- **Structural profile** — `roam pr-risk` now includes cluster spread (how many Louvain communities the change touches) and layer spread (how many architectural layers crossed), surfaced in both text and JSON output.
+
+### Distribution
+
+- **PyPI Trusted Publishing workflow** — `.github/workflows/publish.yml` uses GitHub OIDC tokens, no API secrets needed.
+- **`glama.json`** — MCP server discovery file for Glama.ai registry.
+- **`llms-install.md`** — Machine-readable installation guide for AI agent auto-install.
+
+## v7.1.0
+
+Large-repo safety, deeper Salesforce cross-language edges, and custom report presets. Fixes a latent crash on repos with >999 symbols in queries.
+
+### Batched SQL Infrastructure
+
+- **`batched_in()` / `batched_count()` helpers** — Centralized IN-clause batching in `connection.py`. SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 999; Python's `sqlite3` module doesn't expose `sqlite3_limit()`, so a conservative batch size of 400 prevents crashes on large codebases. Handles single and double `{ph}` placeholders with automatic chunk sizing.
+- **41 unbatched IN-clause sites fixed** across 15 command modules and 2 graph modules: `clusters.py`, `cycles.py`, `cmd_dead.py`, `cmd_context.py`, `cmd_layers.py`, `cmd_module.py`, `cmd_debt.py`, `cmd_affected_tests.py`, `cmd_fn_coupling.py`, `cmd_health.py`, `cmd_coverage_gaps.py`, `cmd_risk.py`, `cmd_safe_zones.py`, `cmd_why.py`, `cmd_impact.py`.
+- **AND-based double-IN correctness** — Queries like `WHERE source_id IN (...) AND target_id IN (...)` cannot be batched by repeating the same subset to both placeholders (cross-batch edges would be missed). Fixed by fetching single-IN results and filtering in Python.
+- **OR-based double-IN** — Split into two separate single-IN queries with dict-based deduplication.
+- **GROUP BY / ORDER BY / LIMIT** — Queries with aggregation that can't work across batches use Python-side `Counter` and `sort` instead.
+
+### Salesforce Enhancements
+
+- **LWC anonymous class extraction** — Lightning Web Components use `export default class extends LightningElement {}` (anonymous). The JavaScript extractor now derives the class name from the filename (e.g., `myComponent.js` → `MyComponent`).
+- **`@salesforce/*` import resolution** — Cross-language edges for `@salesforce/apex/ClassName.method` (→ call), `@salesforce/schema/Object.Field` (→ schema_ref), `@salesforce/label/c.LabelName` (→ label), and `@salesforce/messageChannel/Channel` (→ import).
+- **Apex generic type references** — `List<Account>`, `Set<Contact__c>`, `Map<Id, Opportunity>` now produce `type_ref` edges to the parameterized types. Built-in types (`String`, `Integer`, `Id`, etc.) are filtered out.
+- **Flow actionCalls → Apex edges** — Salesforce Flow XML files with `<actionCalls>` blocks containing `<actionType>apex</actionType>` now produce `call` edges to the referenced Apex class. Block-scoped parsing prevents cross-block false positives.
+- **SF test naming conventions** — `roam test-map` and `roam impact` now discover Salesforce-style test classes (`{Name}Test.cls`, `{Name}_Test.cls`) via convention-based queries, in addition to path/filename pattern matching.
+
+### Custom Report Presets
+
+- **`roam report --config <path>`** — Load custom report presets from a JSON file. Custom presets are merged with built-in ones (`first-contact`, `security`, `pre-pr`, `refactor`). Each preset defines sections with title + command arrays.
+
+### Correctness Fixes
+
+- **Flow XML cross-block regex** — Fixed a bug where the `_extract_flow_refs` regex could span across `</actionCalls>` boundaries, pairing an `actionName` from one block with an `actionType` from another. Replaced with block-scoped parsing.
+- **AND-based double-IN batching** — Fixed `cmd_module.py` cohesion calculation and `cmd_dead.py` cluster detection that undercounted internal edges for large datasets (>200 symbols).
+- **Report `--config` error handling** — Malformed JSON now raises a clean `click.BadParameter` instead of an unhandled traceback.
+
+### Testing
+
+- 67 new tests covering: batched helpers, SF import resolution, Apex generic types, LWC anonymous class, Flow actionCalls, report --config, SF test detection, cross-block safety, cross-batch edge correctness.
+- **556 total tests passing**
+
+## v7.0.0
+
+Major release: Composite health scoring, SARIF output, MCP server, guided onboarding, and deep enhancements across 8 existing commands. Shifts roam from single-metric health to multi-factor CodeScene-inspired analysis.
+
+### New Commands (3)
+
+- **`roam init`** — Guided project onboarding. Creates `.roam/fitness.yaml` with starter rules, generates `.github/workflows/roam.yml` CI workflow, runs initial index, and shows health summary. One command to go from zero to full analysis.
+- **`roam digest`** — Compare current metrics against the most recent snapshot. Shows deltas with directional arrows (improvement/regression), `--brief` for one-line summary, `--since <tag>` for specific comparisons. Generates actionable recommendations.
+- **`roam describe --agent-prompt`** — Compact agent-oriented project summary under 500 tokens. Returns project name, stack, conventions, key abstractions, hotspots, health score, and test command in a format optimized for LLM system prompts.
+
+### New Modules
+
+- **SARIF 2.1.0 output** (`src/roam/output/sarif.py`) — Static Analysis Results Interchange Format for GitHub code scanning. Converters for: dead code, complexity, fitness violations, health issues, breaking changes, and naming conventions. Upload to GitHub Advanced Security for inline PR annotations.
+- **MCP server** (`src/roam/mcp_server.py`) — Model Context Protocol server exposing 12 roam tools (`understand`, `health`, `preflight`, `search_symbol`, `context`, `trace`, `impact`, `file_info`, `pr_risk`, `breaking_changes`, `affected_tests`, `dead_code`, `complexity_report`, `repo_map`) plus 2 resources (`roam://health`, `roam://summary`). Run with `fastmcp run roam.mcp_server:mcp`.
+- **GitHub Action** (`action.yml`) — Reusable composite action for CI. Installs roam, indexes, runs analysis, and posts/updates PR comments with results. Supports `command`, `comment`, `fail-on-violation`, and `roam-version` inputs.
+
+### Composite Health Scoring
+
+- **Multi-factor project health score (0-100)** — Replaces the old cycles-only formula with a composite that weights: tangle ratio (up to -30), god components (up to -20), bottlenecks (up to -15), layer violations (up to -15), and average per-file health (up to -20). Much more accurate for real-world codebases.
+- **Tangle ratio** — Percentage of symbols involved in dependency cycles (Structure101 concept). Displayed in health output: `Tangle: 5.2% (42/800 symbols in cycles)`.
+- **Per-file health score (1-10)** — CodeScene-inspired 7-factor composite per file: max cognitive complexity, file-level indentation complexity, cycle membership, god component membership, dead export ratio, co-change entropy, and churn amplification. Stored in `file_stats.health_score`.
+- **Co-change entropy** — Shannon entropy of co-change distribution per file. High entropy = shotgun surgery. Stored in `file_stats.cochange_entropy`.
+
+### Correctness Fixes
+
+- **elif complexity scoring** — Fixed critical bug where `elif`/`else`/`case` chains inflated cognitive complexity ~3x vs SonarSource spec. Continuation nodes now get +1 flat (no nesting penalty), matching SonarQube behavior exactly.
+
+### Enhanced Commands (8)
+
+- **`roam describe --agent-prompt`** — Compact agent-oriented output mode (under 500 tokens) with project overview, stack, conventions, key abstractions, hotspots, and health.
+- **`roam fitness --explain`** — Show `reason` and `link` fields for each rule. Rules can now include `reason:` and `link:` in `.roam/fitness.yaml`.
+- **`roam file <path1> <path2> ...`** — Multi-file mode with `--changed` (show all uncommitted changed files) and `--deps-of PATH` (show file + all its imports).
+- **`roam context --for-file PATH`** — File-level context: callers grouped by source file, callees grouped by target file, tests, coupling partners, and complexity summary.
+- **`roam bus-factor --brain-methods`** — Brain method detection (cc >= 25 AND line_count >= 50) and Shannon entropy contribution analysis with knowledge risk labels.
+- **`roam health`** — Now shows composite score with tangle ratio in both text and JSON output.
+- **`roam snapshot` / `roam trend`** — Store and track tangle_ratio, avg_complexity, and brain_methods in snapshot history.
+
+### CLI Infrastructure
+
+- **`--compact` flag** — Token-efficient output mode across all commands. TSV tables (40-50% fewer tokens) and minimal JSON envelope (strips version/timestamp/project). For AI agent pipelines where every token counts.
+- **`--gate EXPR`** — CI quality gate expressions (e.g., `roam health --gate score>=70`). Supports `>=`, `<=`, `>`, `<`, `=` operators.
+- **Categorized `--help`** — Progressive disclosure: 48 commands organized into 7 categories (Getting Started, Daily Workflow, Codebase Health, Architecture, Exploration, Reports & CI, Refactoring) instead of flat alphabetical list.
+
+### Schema & Migrations
+
+- `file_stats.health_score REAL` — Per-file health score (1-10)
+- `file_stats.cochange_entropy REAL` — Shannon entropy of co-change partners
+- `snapshots.tangle_ratio REAL` — % of symbols in cycles at snapshot time
+- `snapshots.avg_complexity REAL` — Average cognitive complexity at snapshot time
+- `snapshots.brain_methods INTEGER` — Count of brain methods at snapshot time
+- Safe ALTER TABLE migrations via `_safe_alter()` for existing databases
+
+### Testing
+
+- Comprehensive v7 tests covering: SARIF module, init, digest, describe --agent-prompt, fitness reason/link, multi-file mode, context --for-file, bus-factor entropy/brain-methods, compact mode, gate expressions, categorized help, elif fix, per-file health, composite health, tangle ratio
+- 56 new v7 feature tests
+- **489 total tests passing**
+
+## v6.0.0
+
+Major release: 15 new intelligence commands, cognitive complexity analysis, architectural fitness functions, and compound agent-friendly operations. Shifts roam from descriptive ("what the code looks like") to prescriptive ("how to work with it").
+
+### New Commands (15)
+
+- **`roam complexity`** — Per-function cognitive complexity metrics with multi-factor scoring (nesting, boolean ops, callback depth, params). Includes `--bumpy-road` mode for files with many moderate-complexity functions.
+- **`roam conventions`** — Auto-detect implicit codebase patterns: naming styles (snake_case/camelCase/PascalCase), file organization, import preferences, export patterns. Flags outliers.
+- **`roam debt`** — Hotspot-weighted technical debt prioritization. Combines complexity, churn, cycle membership, and god components. Code in hotspots costs 15x more — focus refactoring here.
+- **`roam fitness`** — Architectural fitness function runner. Define rules in `.roam/fitness.yaml` for dependency constraints, metric thresholds, and naming conventions. Returns exit code 1 for CI integration.
+- **`roam preflight`** — Compound pre-change safety check. Combines blast radius + affected tests + complexity + coupling + conventions + fitness into one call. Reduces agent round-trips by 60-70%.
+- **`roam affected-tests`** — Trace from changed symbol/file through reverse call graph to test files. Classifies as DIRECT/TRANSITIVE/COLOCATED. Outputs runnable `pytest` command with `--command`.
+- **`roam entry-points`** — Entry point catalog with protocol classification (HTTP, CLI, Event, Scheduled, Message, Main, Export). Shows fan-out and reachability coverage per entry point.
+- **`roam safe-zones`** — Graph-based containment boundary analysis. Shows ISOLATED/CONTAINED/EXPOSED zones, internal symbols safe to change, and boundary symbols requiring contract maintenance.
+- **`roam patterns`** — Architectural pattern recognition: Strategy, Factory, Observer, Repository, Middleware, Decorator. Detects patterns from graph structure and naming.
+- **`roam bus-factor`** — Knowledge loss risk per module. Tracks author concentration, recency, and bus factor. Flags single-point-of-failure directories.
+- **`roam breaking`** — Breaking change detection between git refs. Finds removed exports, signature changes, and renamed symbols.
+- **`roam alerts`** — Health degradation trend detection from snapshot history. Fires CRITICAL/WARNING/INFO alerts for threshold violations and worsening trends.
+- **`roam fn-coupling`** — Function-level temporal coupling. Finds symbols that co-change across files without direct edges — hidden dependencies.
+- **`roam doc-staleness`** — Detect stale docstrings where code body changed long after documentation was last updated.
+- **`roam complexity --bumpy-road`** — Files where many functions are individually moderate but collectively hard to maintain.
+
+### Enhanced Commands
+
+- **`roam understand`** — Now includes conventions, complexity overview (avg/critical/high), pattern summary, and debt hotspots alongside existing sections.
+- **`roam describe`** — Generates CLAUDE.md with Coding Conventions and Complexity Hotspots sections for agents to follow.
+- **`roam context --task`** — Task-aware context mode: `refactor|debug|extend|review|understand` tailors output to agent intent. Refactor shows coupling + blast radius; debug shows execution flow; extend shows conventions to follow.
+- **`roam map --budget N`** — Token-budget-aware repo map. Constrains output to N tokens using PageRank ranking.
+- **`roam diff --tests --coupling --fitness`** — Enhanced diff with affected tests, coupling warnings for missing co-change partners, and fitness rule checks. `--full` enables all three.
+
+### Infrastructure
+
+- **`symbol_metrics` table** — Per-function complexity data stored during indexing: cognitive_complexity, nesting_depth, param_count, line_count, return_count, bool_op_count, callback_depth.
+- **Cognitive complexity module** (`src/roam/index/complexity.py`) — Tree-sitter AST-based complexity analysis. Walks control flow nodes with nesting penalties (SonarSource-inspired).
+- **Fitness YAML config** — `.roam/fitness.yaml` for user-defined architectural rules. Supports dependency, metric, and naming rule types.
+
+### Testing
+
+- 62 new v6 feature tests (conventions, complexity, debt, preflight, fitness, patterns, safe-zones, entry-points, alerts, bus-factor, fn-coupling, doc-staleness, task-context, enhanced understand/describe)
+- 17 new performance benchmarks for v6 commands
+- **393 total tests passing**
+
+## v5.0.0
+
+Major release: 6 new commands, Salesforce language support, hypergraph co-change analysis, and defensive hardening across all commands.
+
+### New Commands
+
+- **`roam understand`** — Single-call codebase comprehension for AI agents. Returns tech stack, architecture overview, key abstractions, health summary, and entry points in one shot. Designed for LLM context priming.
+- **`roam coverage-gaps`** — Find unprotected entry points with no path to a required gate (auth, permission, etc.). BFS reachability from entry points to gate symbols.
+- **`roam snapshot`** — Persist a timestamped health metrics snapshot to the index DB. Use `--tag` to label milestones.
+- **`roam trend`** — Display health score history with sparkline visualization. Supports `--assert "metric<=N"` for CI quality gates.
+- **`roam report`** — Run compound presets (first-contact, security, pre-pr, refactor) that execute multiple commands in one shot. Supports `--list` and custom preset names.
+- **`roam coupling --set`** — Set-mode coupling analysis against changesets with hypergraph surprise scoring.
+
+### Enhanced Commands
+
+- **`roam dead`** — Added `--summary`, `--by-kind`, `--clusters` flags for grouped dead-code analysis and cluster detection.
+- **`roam context`** — Batch mode: pass multiple symbols to get shared callers and merged context.
+- **`roam risk`** — Added `--explain` flag with full BFS chain reasoning showing why symbols are risky.
+- **`roam grep`** — Added `--source-only`, `--exclude`, `--test-only` filters.
+- **`roam coupling`** — Added `--staged` changeset mode and hypergraph surprise score.
+- **`roam pr-risk`** — Added hypergraph novelty factor for change-pattern analysis.
+
+### Salesforce Support
+
+- **Grammar aliasing infrastructure** — Languages without dedicated tree-sitter grammars can piggyback on existing ones (apex -> java, aura/visualforce/sfxml -> html).
+- **Apex extractor** (`.cls`, `.trigger`) — Extends Java extractor with SOQL query refs, System.Label refs, sharing modifiers, trigger declarations, and Salesforce annotations.
+- **Aura extractor** (`.cmp`, `.app`, `.evt`, `.intf`, `.design`) — Component structure, attribute/method/event symbols, controller refs, custom component refs.
+- **Visualforce extractor** (`.page`) — Page symbols, controller/extensions refs, merge field scanning.
+- **SF Metadata XML extractor** (`*-meta.xml`) — Object/field/class metadata, formula scanning, sidecar deduplication.
+- **Cross-language edge resolution** — `@salesforce/apex/`, `@salesforce/schema/`, `@salesforce/label/` import paths resolve across language boundaries.
+
+### Infrastructure
+
+- **JSON envelope contract** — All `--json` output now wrapped in `json_envelope(command, summary, **payload)` with consistent `command`, `timestamp`, `summary` fields across all 34 commands.
+- **Hypergraph co-change tables** — N-ary commit patterns stored in `git_hyperedges`/`git_hyperedge_files` for surprise scoring.
+- **Shared `changed_files` utility** — Extracted common `--staged`/`--diff`/`--branch` file detection into reusable module.
+- **Metrics history** — `metrics_snapshots` table for trend tracking with `append_snapshot()` API.
+- **Defensive hardening** — `.get()` safety patterns, `or 0` null-safe arithmetic, and empty-result guards across all commands and graph metrics.
+
+### Testing
+
+- 27 Salesforce-specific tests covering all 4 extractors, grammar aliasing, and project-level indexing.
+- 20 integration tests for new commands (understand, dead enhancements, context batch, snapshot, trend, coverage-gaps, report, JSON envelope).
+- 72 performance tests including indexing benchmarks, query latency, stress tests, and self-benchmarks on roam-code itself.
+
+### Performance (self-benchmark on roam-code, ~140 files)
+
+| Command | Latency |
+|---------|---------|
+| understand | ~800ms |
+| health | ~770ms |
+| layers | ~780ms |
+| map | ~200ms |
+| dead | ~220ms |
+| coupling | ~220ms |
+| weather | ~190ms |
+
+All commands under 1s on a real-world Python project.

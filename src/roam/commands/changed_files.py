@@ -1,14 +1,72 @@
-"""Helpers for resolving changed files from git and CLI inputs."""
+"""Shared utilities for resolving changed files from git."""
 
+from __future__ import annotations
+
+import os
 import subprocess
+from pathlib import Path
 
 
-def _git_diff_names(root, staged=False, commit_range=None):
+# ---------------------------------------------------------------------------
+# Test / low-risk file detection
+# ---------------------------------------------------------------------------
+
+_TEST_NAME_PATS = ["test_", "_test.", ".test.", ".spec."]
+_TEST_DIR_PATS = ["tests/", "test/", "__tests__/", "spec/"]
+
+
+def is_test_file(path: str) -> bool:
+    """Check if a file path looks like a test file."""
+    p = path.replace("\\", "/")
+    bn = os.path.basename(p)
+    return any(pat in bn for pat in _TEST_NAME_PATS) or any(d in p for d in _TEST_DIR_PATS)
+
+
+_LOW_RISK_EXTS = {
+    ".md", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml",
+    ".ini", ".cfg", ".lock", ".xml", ".svg", ".png", ".jpg",
+    ".gif", ".ico", ".csv", ".env",
+}
+
+
+def is_low_risk_file(path: str) -> bool:
+    """Check if a file is docs/config/asset with dampened risk contribution."""
+    p = path.replace("\\", "/").lower()
+    _, ext = os.path.splitext(p)
+    return ext in _LOW_RISK_EXTS
+
+
+# ---------------------------------------------------------------------------
+# Changed file resolution
+# ---------------------------------------------------------------------------
+
+
+def get_changed_files(
+    root: Path,
+    staged: bool = False,
+    commit_range: str | None = None,
+    pr: bool = False,
+    base_ref: str = "main",
+) -> list[str]:
+    """Get list of changed files from git diff.
+
+    Supports four mutually exclusive sources:
+    - *commit_range*: arbitrary range (e.g. ``HEAD~3..HEAD``)
+    - *staged*: files in the staging area
+    - *pr*: files changed in ``base_ref..HEAD``
+    - (default): unstaged working-tree changes
+
+    Returns normalised forward-slash paths relative to the repo root.
+    """
     cmd = ["git", "diff", "--name-only"]
+
     if commit_range:
         cmd.append(commit_range)
+    elif pr:
+        cmd.append(f"{base_ref}...HEAD")
     elif staged:
         cmd.append("--cached")
+
     try:
         result = subprocess.run(
             cmd,
@@ -19,37 +77,33 @@ def _git_diff_names(root, staged=False, commit_range=None):
             encoding="utf-8",
             errors="replace",
         )
+        if result.returncode != 0:
+            return []
+        return [
+            p.replace("\\", "/")
+            for p in result.stdout.strip().splitlines()
+            if p.strip()
+        ]
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
-    if result.returncode != 0:
-        return []
 
-    return [
-        p.replace("\\", "/")
-        for p in result.stdout.strip().splitlines()
-        if p.strip()
-    ]
+def resolve_changed_to_db(conn, changed_paths: list[str]) -> dict[str, int]:
+    """Map a list of changed paths to ``{path: file_id}`` using the index DB.
 
-
-def resolve_changed_files(root, against_paths=None, staged=False, use_pr=False, base_ref="main"):
-    """Return (paths, label) from one change source.
-
-    Sources (mutually exclusive):
-    - explicit against paths
-    - staged git diff
-    - PR range: <base_ref>..HEAD
+    Falls back to LIKE matching when exact path fails (handles sub-directory
+    prefixes and normalisation differences).
     """
-    against_paths = tuple(against_paths or ())
-
-    if against_paths:
-        return [p.replace("\\", "/") for p in against_paths], "explicit"
-
-    if use_pr:
-        commit_range = f"{base_ref}..HEAD"
-        return _git_diff_names(root, commit_range=commit_range), commit_range
-
-    if staged:
-        return _git_diff_names(root, staged=True), "staged"
-
-    return [], ""
+    file_map: dict[str, int] = {}
+    for path in changed_paths:
+        row = conn.execute(
+            "SELECT id, path FROM files WHERE path = ?", (path,)
+        ).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT id, path FROM files WHERE path LIKE ? LIMIT 1",
+                (f"%{path}",),
+            ).fetchone()
+        if row:
+            file_map[row["path"]] = row["id"]
+    return file_map

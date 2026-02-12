@@ -1,172 +1,262 @@
-"""Find entry points that do not transitively pass through gate symbols."""
+"""Find unprotected entry points — symbols with no path to a required gate."""
 
-from collections import deque
-import fnmatch
+import re
+from collections import defaultdict
 
 import click
 
+from roam.db.connection import open_db, batched_in
+from roam.output.formatter import abbrev_kind, loc, format_table, to_json, json_envelope
 from roam.commands.resolve import ensure_index
-from roam.db.connection import open_db
-from roam.output.formatter import abbrev_kind, loc, to_json, json_envelope
 
 
-def _parse_csv(text: str) -> list[str]:
-    return [x.strip() for x in text.split(",") if x.strip()]
+def _find_gates(conn, gate_names, gate_pattern):
+    """Find gate symbol IDs by exact name or regex pattern."""
+    gates = set()
+    gate_info = {}
+
+    if gate_names:
+        names = [n.strip() for n in gate_names.split(",") if n.strip()]
+        for name in names:
+            rows = conn.execute(
+                "SELECT s.id, s.name, f.path as file_path, s.line_start "
+                "FROM symbols s JOIN files f ON s.file_id = f.id "
+                "WHERE s.name = ?",
+                (name,),
+            ).fetchall()
+            for r in rows:
+                gates.add(r["id"])
+                gate_info[r["id"]] = r["name"]
+
+    if gate_pattern:
+        regex = re.compile(gate_pattern, re.IGNORECASE)
+        rows = conn.execute(
+            "SELECT s.id, s.name, f.path as file_path, s.line_start "
+            "FROM symbols s JOIN files f ON s.file_id = f.id "
+        ).fetchall()
+        for r in rows:
+            if regex.search(r["name"]):
+                gates.add(r["id"])
+                gate_info[r["id"]] = r["name"]
+
+    return gates, gate_info
 
 
-def _in_scope(path: str, patterns: list[str]) -> bool:
-    p = path.replace("\\", "/")
-    return any(fnmatch.fnmatch(p, pat) for pat in patterns)
+def _find_entries(conn, scope, entry_pattern):
+    """Find entry point symbols — exported top-level functions, optionally scoped."""
+    sql = (
+        "SELECT s.id, s.name, s.kind, f.path as file_path, s.line_start "
+        "FROM symbols s JOIN files f ON s.file_id = f.id "
+        "WHERE s.is_exported = 1 AND s.kind IN ('function', 'method') "
+        "AND s.parent_id IS NULL "
+    )
+    params = []
+
+    if scope:
+        # Convert glob to LIKE pattern
+        like = scope.replace("*", "%").replace("?", "_")
+        sql += "AND f.path LIKE ? "
+        params.append(like)
+
+    sql += "ORDER BY f.path, s.line_start"
+    rows = conn.execute(sql, params).fetchall()
+
+    if entry_pattern:
+        regex = re.compile(entry_pattern, re.IGNORECASE)
+        rows = [r for r in rows if regex.search(r["name"])]
+
+    return rows
 
 
-def _find_path_to_gate(entry_id: int, gate_ids: set[int], adj: dict[int, list[int]], max_depth: int) -> list[int] | None:
-    """Return shortest path (symbol IDs) from entry to any gate, if found."""
-    if entry_id in gate_ids:
-        return [entry_id]
+def _build_adj(conn):
+    """Build adjacency list from edges table (source → [targets])."""
+    adj = defaultdict(set)
+    for e in conn.execute("SELECT source_id, target_id FROM edges").fetchall():
+        adj[e["source_id"]].add(e["target_id"])
+    return adj
 
-    q = deque([(entry_id, [entry_id])])
-    visited = {entry_id}
 
-    while q:
-        cur, path = q.popleft()
-        depth = len(path) - 1
+def _bfs_to_gate(adj, start_id, gates, max_depth):
+    """BFS from start_id to find shortest path to any gate symbol.
+
+    Returns (gate_name, depth, chain) or (None, None, None) if not found.
+    """
+    if start_id in gates:
+        return start_id, 0, [start_id]
+
+    visited = {start_id}
+    # Queue entries: (node_id, depth, path)
+    queue = [(start_id, 0, [start_id])]
+
+    while queue:
+        current, depth, path = queue.pop(0)
         if depth >= max_depth:
             continue
-        for nxt in adj.get(cur, []):
-            if nxt in visited:
+        for neighbor in adj.get(current, set()):
+            if neighbor in visited:
                 continue
-            visited.add(nxt)
-            nxt_path = path + [nxt]
-            if nxt in gate_ids:
-                return nxt_path
-            q.append((nxt, nxt_path))
-    return None
+            visited.add(neighbor)
+            new_path = path + [neighbor]
+            if neighbor in gates:
+                return neighbor, depth + 1, new_path
+            queue.append((neighbor, depth + 1, new_path))
+
+    return None, None, None
 
 
 @click.command("coverage-gaps")
-@click.option("--gate", "gates_csv", required=True,
-              help="Comma-separated gate symbol names (e.g. requireUser,requireAuth)")
-@click.option("--scope", default="**", show_default=True,
-              help="File scope glob(s), comma-separated (e.g. app/routes/**)")
-@click.option("--max-depth", default=8, show_default=True, type=int,
-              help="Maximum call-chain depth when searching for gate reachability")
+@click.option("--gate", "gate_names", default=None,
+              help="Comma-separated gate symbol names (e.g. 'requireAuth,validateToken')")
+@click.option("--gate-pattern", "gate_pattern", default=None,
+              help="Regex to match gate symbols by name (e.g. 'auth|permission|guard')")
+@click.option("--scope", default=None,
+              help="File scope glob (e.g. 'app/routes/**')")
+@click.option("--entry-pattern", "entry_pattern", default=None,
+              help="Regex to filter entry points by name (e.g. 'handler|controller')")
+@click.option("--max-depth", default=8, show_default=True, help="Max BFS depth")
 @click.pass_context
-def coverage_gaps(ctx, gates_csv, scope, max_depth):
-    """Find uncovered entry points: exported functions with no gate in call chain."""
-    json_mode = ctx.obj.get("json") if ctx.obj else False
+def coverage_gaps(ctx, gate_names, gate_pattern, scope, entry_pattern, max_depth):
+    """Find entry points with no path to a required gate symbol.
+
+    Use --gate for exact names or --gate-pattern for regex matching.
+    Searches the call graph to find which entry points can reach a gate
+    and which are unprotected.
+    """
+    json_mode = ctx.obj.get('json') if ctx.obj else False
     ensure_index()
 
-    gate_names = _parse_csv(gates_csv)
-    scope_patterns = _parse_csv(scope) or ["**"]
+    if not gate_names and not gate_pattern:
+        click.echo("Provide --gate <names> or --gate-pattern <regex>")
+        raise SystemExit(1)
 
     with open_db(readonly=True) as conn:
-        # Find gate symbols by name.
-        ph = ",".join("?" for _ in gate_names) or "''"
-        gate_rows = conn.execute(
-            f"SELECT id, name FROM symbols WHERE name IN ({ph})",
-            gate_names,
-        ).fetchall()
-        gate_ids = {r["id"] for r in gate_rows}
-        gate_name_by_id = {r["id"]: r["name"] for r in gate_rows}
+        gates, gate_info = _find_gates(conn, gate_names, gate_pattern)
 
-        # Exported top-level functions in scope are treated as entry points.
-        entry_rows = conn.execute(
-            "SELECT s.id, s.name, s.kind, s.line_start, f.path AS file_path "
-            "FROM symbols s "
-            "JOIN files f ON s.file_id = f.id "
-            "WHERE s.is_exported = 1 "
-            "AND s.parent_id IS NULL "
-            "AND s.kind = 'function' "
-            "ORDER BY f.path, s.line_start"
-        ).fetchall()
-        entries = [r for r in entry_rows if _in_scope(r["file_path"], scope_patterns)]
+        if not gates:
+            if json_mode:
+                click.echo(to_json(json_envelope("coverage-gaps",
+                    summary={"error": "No gate symbols found"},
+                )))
+            else:
+                click.echo("No gate symbols found matching the criteria.")
+            return
 
-        # Build call/uses adjacency graph.
-        adj: dict[int, list[int]] = {}
-        for r in conn.execute(
-            "SELECT source_id, target_id FROM edges WHERE kind IN ('call', 'uses')"
-        ).fetchall():
-            adj.setdefault(r["source_id"], []).append(r["target_id"])
+        entries = _find_entries(conn, scope, entry_pattern)
+        if not entries:
+            if json_mode:
+                click.echo(to_json(json_envelope("coverage-gaps",
+                    summary={"error": "No entry points found"},
+                )))
+            else:
+                click.echo("No entry points found in scope.")
+            return
 
-        # Symbol names for chain rendering.
-        symbol_names = {
-            r["id"]: r["name"]
-            for r in conn.execute("SELECT id, name FROM symbols").fetchall()
-        }
+        adj = _build_adj(conn)
+
+        # Resolve symbol names for chain display
+        id_to_name = {}
+        all_ids = set()
+        for e in entries:
+            all_ids.add(e["id"])
+        for g in gates:
+            all_ids.add(g)
+        # Batch fetch names
+        if all_ids:
+            for r in batched_in(
+                conn,
+                "SELECT id, name FROM symbols WHERE id IN ({ph})",
+                list(all_ids),
+            ):
+                id_to_name[r["id"]] = r["name"]
 
         covered = []
         uncovered = []
 
-        for e in entries:
-            path_ids = _find_path_to_gate(e["id"], gate_ids, adj, max_depth) if gate_ids else None
-            base = {
-                "name": e["name"],
-                "kind": e["kind"],
-                "file": e["file_path"],
-                "line": e["line_start"],
-                "location": loc(e["file_path"], e["line_start"]),
-            }
-            if path_ids:
-                gate_id = path_ids[-1]
-                depth = len(path_ids) - 1
-                chain = [symbol_names.get(sid, "?") for sid in path_ids]
+        for entry in entries:
+            gate_id, depth, chain = _bfs_to_gate(adj, entry["id"], gates, max_depth)
+            if gate_id is not None:
+                # Resolve chain names (lazy — fetch as needed)
+                chain_names = []
+                for sid in chain:
+                    if sid not in id_to_name:
+                        r = conn.execute("SELECT name FROM symbols WHERE id = ?", (sid,)).fetchone()
+                        id_to_name[sid] = r["name"] if r else "?"
+                    chain_names.append(id_to_name[sid])
+
                 covered.append({
-                    **base,
-                    "gate": gate_name_by_id.get(gate_id, "?"),
+                    "name": entry["name"],
+                    "kind": entry["kind"],
+                    "file": entry["file_path"],
+                    "line": entry["line_start"],
+                    "gate": gate_info.get(gate_id, "?"),
                     "depth": depth,
-                    "via": chain[-2] if len(chain) > 1 else chain[-1],
-                    "chain": chain,
+                    "chain": chain_names,
                 })
             else:
                 uncovered.append({
-                    **base,
-                    "reason": (
-                        "no gate symbol found"
-                        if not gate_ids
-                        else "no auth gate in call chain"
-                    ),
+                    "name": entry["name"],
+                    "kind": entry["kind"],
+                    "file": entry["file_path"],
+                    "line": entry["line_start"],
+                    "reason": f"no gate in call chain (searched {max_depth} hops)",
                 })
 
-        covered.sort(key=lambda x: (x["file"], x["line"], x["name"]))
-        uncovered.sort(key=lambda x: (x["file"], x["line"], x["name"]))
-
         total = len(entries)
-        summary = {
-            "total_entry_points": total,
-            "covered": len(covered),
-            "uncovered": len(uncovered),
-            "gate_symbols_found": len(gate_ids),
-            "coverage_pct": round((len(covered) * 100 / total), 1) if total else 0.0,
-        }
+        coverage_pct = round(len(covered) * 100 / total, 1) if total else 0
 
         if json_mode:
-            click.echo(to_json(json_envelope(
-                "coverage-gaps",
-                summary=summary,
-                gates=gate_names,
-                scope=scope_patterns,
-                max_depth=max_depth,
-                covered=covered,
+            click.echo(to_json(json_envelope("coverage-gaps",
+                summary={
+                    "total_entries": total,
+                    "covered": len(covered),
+                    "uncovered": len(uncovered),
+                    "coverage_pct": coverage_pct,
+                    "gates_found": sorted(set(gate_info.values())),
+                },
+                gates_found=sorted(set(gate_info.values())),
                 uncovered=uncovered,
+                covered=covered,
             )))
             return
 
-        click.echo("=== Uncovered Entry Points ===")
-        if uncovered:
-            for item in uncovered:
-                click.echo(
-                    f"  {abbrev_kind(item['kind'])}  {item['name']:<20s}  "
-                    f"{item['location']:<40s}  ({item['reason']})"
-                )
-        else:
-            click.echo("  (none)")
+        # --- Text output ---
+        click.echo(f"=== Coverage Gaps ===\n")
+        click.echo(f"Gates: {', '.join(sorted(set(gate_info.values())))}")
+        click.echo(f"Entry points: {total}  Covered: {len(covered)}  "
+                    f"Uncovered: {len(uncovered)}  Coverage: {coverage_pct}%")
+        click.echo()
 
-        click.echo(f"\n=== Covered Entry Points ({len(covered)}/{total}) ===")
+        if uncovered:
+            click.echo(f"-- Uncovered ({len(uncovered)}) --")
+            rows = []
+            for u in uncovered[:30]:
+                rows.append([
+                    u["name"], abbrev_kind(u["kind"]),
+                    loc(u["file"], u["line"]),
+                    u["reason"],
+                ])
+            click.echo(format_table(
+                ["Name", "Kind", "Location", "Reason"],
+                rows,
+                budget=30,
+            ))
+            click.echo()
+
         if covered:
-            for item in covered:
-                click.echo(
-                    f"  {abbrev_kind(item['kind'])}  {item['name']:<20s}  "
-                    f"{item['location']:<40s}  via {item['gate']} (depth {item['depth']})"
-                )
-        else:
-            click.echo("  (none)")
+            click.echo(f"-- Covered ({len(covered)}) --")
+            rows = []
+            for c in covered[:20]:
+                chain_str = " -> ".join(c["chain"][:5])
+                if len(c["chain"]) > 5:
+                    chain_str += f" (+{len(c['chain']) - 5})"
+                rows.append([
+                    c["name"], abbrev_kind(c["kind"]),
+                    loc(c["file"], c["line"]),
+                    c["gate"], str(c["depth"]),
+                    chain_str,
+                ])
+            click.echo(format_table(
+                ["Name", "Kind", "Location", "Gate", "Depth", "Chain"],
+                rows,
+                budget=20,
+            ))

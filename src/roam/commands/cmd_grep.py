@@ -7,27 +7,42 @@ import subprocess
 import click
 
 from roam.db.connection import find_project_root, open_db
-from roam.output.formatter import abbrev_kind, loc, to_json
+from roam.output.formatter import abbrev_kind, loc, to_json, json_envelope
 from roam.commands.resolve import ensure_index
+from roam.commands.changed_files import is_test_file
 
+
+# ---------------------------------------------------------------------------
+# Source-only exclusion patterns
+# ---------------------------------------------------------------------------
 
 _SOURCE_ONLY_EXCLUDES = [
     "*.md", "*.markdown", "*.txt", "*.rst",
-    "*.json", "*.yaml", "*.yml", "*.toml", "*.ini", "*.cfg", "*.lock",
-    "*.example", "*.sample",
+    "*.json", "*.yaml", "*.yml", "*.toml", "*.ini", "*.cfg",
+    "*.lock", "*.example", "*.sample",
+    "*.svg", "*.png", "*.jpg", "*.gif", "*.ico",
     "docs/**", "**/docs/**",
 ]
 
 
-def _is_excluded(path, exclude_patterns):
+def _matches_any_exclude(path, excludes):
+    """Check if a path matches any of the exclusion patterns."""
+    import fnmatch
     p = path.replace("\\", "/")
-    return any(_matches_glob(p, pat) for pat in exclude_patterns)
+    for pat in excludes:
+        if fnmatch.fnmatch(p, pat) or fnmatch.fnmatch(os.path.basename(p), pat):
+            return True
+    return False
 
 
-def _grep_files(pattern, root, glob_filter=None, exclude_patterns=None):
+# ---------------------------------------------------------------------------
+# Core grep
+# ---------------------------------------------------------------------------
+
+
+def _grep_files(pattern, root, glob_filter=None):
     """Grep for a pattern using git grep (fast) or fallback to manual search."""
     matches = []
-    exclude_patterns = exclude_patterns or []
     regex = re.compile(pattern, re.IGNORECASE)
 
     # Try git grep first
@@ -46,11 +61,8 @@ def _grep_files(pattern, root, glob_filter=None, exclude_patterns=None):
                 if len(parts) >= 3:
                     path, line_num, content = parts[0], parts[1], parts[2]
                     try:
-                        norm_path = path.replace("\\", "/")
-                        if _is_excluded(norm_path, exclude_patterns):
-                            continue
                         matches.append({
-                            "path": norm_path,
+                            "path": path.replace("\\", "/"),
                             "line": int(line_num),
                             "content": content.strip(),
                         })
@@ -70,8 +82,6 @@ def _grep_files(pattern, root, glob_filter=None, exclude_patterns=None):
 
     for rel_path in file_paths:
         if glob_filter and not _matches_glob(rel_path, glob_filter):
-            continue
-        if _is_excluded(rel_path, exclude_patterns):
             continue
         full_path = root / rel_path
         try:
@@ -127,13 +137,15 @@ def _find_enclosing_symbol(conn, file_path, line_num):
 @click.argument("pattern")
 @click.option("-g", "--glob", "glob_filter", default=None,
               help="Filter by file type or glob (e.g. 'vue', '.ts', '*.php')")
-@click.option("--source-only", is_flag=True,
-              help="Exclude common docs/config/example files from results")
-@click.option("--exclude", "exclude_csv", default="",
-              help="Comma-separated exclude globs (e.g. '*.md,docs/**')")
 @click.option("-n", "count", default=50, help="Max results to show")
+@click.option("-s", "--source-only", is_flag=True,
+              help="Exclude docs, configs, and non-source files")
+@click.option("-t", "--test-only", is_flag=True,
+              help="Only search in test files")
+@click.option("--exclude", "exclude_patterns", default=None,
+              help="Comma-separated exclusion globs (e.g. '*.md,docs/**')")
 @click.pass_context
-def grep_cmd(ctx, pattern, glob_filter, source_only, exclude_csv, count):
+def grep_cmd(ctx, pattern, glob_filter, count, source_only, test_only, exclude_patterns):
     """Context-enriched grep: search with enclosing symbol annotation."""
     json_mode = ctx.obj.get('json') if ctx.obj else False
     ensure_index()
@@ -144,22 +156,28 @@ def grep_cmd(ctx, pattern, glob_filter, source_only, exclude_csv, count):
         ext = glob_filter if glob_filter.startswith(".") else f".{glob_filter}"
         glob_filter = f"*{ext}"
 
-    exclude_patterns = []
-    if source_only:
-        exclude_patterns.extend(_SOURCE_ONLY_EXCLUDES)
-    if exclude_csv:
-        exclude_patterns.extend(p.strip() for p in exclude_csv.split(",") if p.strip())
+    matches = _grep_files(pattern, root, glob_filter)
 
-    matches = _grep_files(pattern, root, glob_filter, exclude_patterns)
+    # --- Apply post-filters ---
+    excludes = []
+    if source_only:
+        excludes.extend(_SOURCE_ONLY_EXCLUDES)
+    if exclude_patterns:
+        excludes.extend(p.strip() for p in exclude_patterns.split(",") if p.strip())
+
+    if excludes:
+        matches = [m for m in matches if not _matches_any_exclude(m["path"], excludes)]
+
+    if test_only:
+        matches = [m for m in matches if is_test_file(m["path"])]
+
     if not matches:
         if json_mode:
-            click.echo(to_json({
-                "pattern": pattern,
-                "total": 0,
-                "source_only": source_only,
-                "exclude": exclude_patterns,
-                "matches": [],
-            }))
+            click.echo(to_json(json_envelope("grep",
+                summary={"total": 0},
+                pattern=pattern, matches=[],
+                source_only=source_only, test_only=test_only,
+            )))
         else:
             click.echo(f"No matches for '{pattern}'")
         return
@@ -174,13 +192,15 @@ def grep_cmd(ctx, pattern, glob_filter, source_only, exclude_csv, count):
                     entry["enclosing_symbol"] = sym["qualified_name"]
                     entry["enclosing_kind"] = sym["kind"]
                 results.append(entry)
-            click.echo(to_json({
-                "pattern": pattern,
-                "total": len(matches),
-                "source_only": source_only,
-                "exclude": exclude_patterns,
-                "matches": results,
-            }))
+            click.echo(to_json(json_envelope("grep",
+                summary={"total": len(matches), "shown": len(results)},
+                pattern=pattern,
+                total=len(matches),
+                source_only=source_only,
+                test_only=test_only,
+                exclude_patterns=excludes if excludes else None,
+                matches=results,
+            )))
         return
 
     click.echo(f"=== {len(matches)} matches for '{pattern}' ===\n")

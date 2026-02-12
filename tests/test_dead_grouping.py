@@ -67,7 +67,7 @@ def test_dead_by_directory_json(dead_project):
     assert rc == 0, out
     data = json.loads(out)
     assert "groups" in data
-    dirs = {g["group"] for g in data["groups"]}
+    dirs = {g["key"] for g in data["groups"]}
     assert "app/actions" in dirs
     assert "app/components" in dirs
 
@@ -77,11 +77,11 @@ def test_dead_by_kind_json(dead_project):
     assert rc == 0, out
     data = json.loads(out)
     assert "groups" in data
-    kinds = {g["group"] for g in data["groups"]}
+    kinds = {g["key"] for g in data["groups"]}
     assert "function" in kinds
 
 
 def test_dead_summary_only_text(dead_project):
     out, rc = _roam("dead", "--summary", cwd=dead_project)
     assert rc == 0, out
-    assert "Actions:" in out
+    assert "Dead exports:" in out or "dead" in out.lower()

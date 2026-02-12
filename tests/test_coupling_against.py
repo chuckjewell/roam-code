@@ -68,14 +68,20 @@ def coupling_project(tmp_path):
     return root
 
 
-def test_coupling_against_reports_missing(coupling_project):
+def test_coupling_against_commit_range(coupling_project):
+    # Change only a.py in a new commit so --against finds missing co-changers.
+    with open(coupling_project / "a.py", "a", encoding="utf-8") as f:
+        f.write("\n# solo-change\n")
+    _git(coupling_project, "add", "a.py")
+    _git(coupling_project, "commit", "-m", "solo")
+
     out, rc = _run_roam(
         "--json",
         "coupling",
         "--against",
-        "a.py",
+        "HEAD~1..HEAD",
         "--min-strength",
-        "0.8",
+        "0.3",
         "--min-cochanges",
         "2",
         cwd=coupling_project,
@@ -84,29 +90,8 @@ def test_coupling_against_reports_missing(coupling_project):
 
     data = json.loads(out)
     assert data["command"] == "coupling"
-    assert data["summary"]["mode"] == "against"
-    assert any(item["path"] == "b.py" for item in data["missing"])
-
-
-def test_coupling_against_marks_included(coupling_project):
-    out, rc = _run_roam(
-        "--json",
-        "coupling",
-        "--against",
-        "a.py",
-        "--against",
-        "b.py",
-        "--min-strength",
-        "0.8",
-        "--min-cochanges",
-        "2",
-        cwd=coupling_project,
-    )
-    assert rc == 0, out
-
-    data = json.loads(out)
-    assert not any(item["path"] == "b.py" for item in data["missing"])
-    assert any(item["path"] == "b.py" for item in data["included"])
+    assert data["mode"] == "against"
+    assert any(item["path"] == "b.py" for item in data["missing_cochanges"])
 
 
 def test_coupling_staged_uses_indexed_changes(coupling_project):
@@ -119,7 +104,7 @@ def test_coupling_staged_uses_indexed_changes(coupling_project):
         "coupling",
         "--staged",
         "--min-strength",
-        "0.8",
+        "0.3",
         "--min-cochanges",
         "2",
         cwd=coupling_project,
@@ -127,24 +112,26 @@ def test_coupling_staged_uses_indexed_changes(coupling_project):
     assert rc == 0, out
 
     data = json.loads(out)
-    assert data["summary"]["mode"] == "against"
-    assert any(item["path"] == "b.py" for item in data["missing"])
+    assert data["mode"] == "against"
+    assert any(item["path"] == "b.py" for item in data["missing_cochanges"])
 
 
-def test_coupling_pr_range(coupling_project):
+def test_coupling_against_includes_partner(coupling_project):
+    # Change both a.py and b.py so b.py appears in included, not missing.
     with open(coupling_project / "a.py", "a", encoding="utf-8") as f:
-        f.write("\n# pr-commit\n")
-    _git(coupling_project, "add", "a.py")
-    _git(coupling_project, "commit", "-m", "pr change")
+        f.write("\n# both-1\n")
+    with open(coupling_project / "b.py", "a", encoding="utf-8") as f:
+        f.write("\n# both-1\n")
+    _git(coupling_project, "add", "a.py", "b.py")
+    _git(coupling_project, "commit", "-m", "both")
 
     out, rc = _run_roam(
         "--json",
         "coupling",
-        "--pr",
-        "--base",
-        "HEAD~1",
+        "--against",
+        "HEAD~1..HEAD",
         "--min-strength",
-        "0.8",
+        "0.3",
         "--min-cochanges",
         "2",
         cwd=coupling_project,
@@ -152,4 +139,5 @@ def test_coupling_pr_range(coupling_project):
     assert rc == 0, out
 
     data = json.loads(out)
-    assert any(item["path"] == "b.py" for item in data["missing"])
+    assert not any(item["path"] == "b.py" for item in data["missing_cochanges"])
+    assert any(item["path"] == "b.py" for item in data["included_partners"])

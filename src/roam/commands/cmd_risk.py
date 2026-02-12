@@ -1,15 +1,15 @@
 """Show domain-weighted risk ranking of symbols."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
 
 import click
 
-from roam.db.connection import open_db
-from roam.output.formatter import (
-    abbrev_kind, loc, format_table, to_json, json_envelope,
-)
+from roam.db.connection import open_db, batched_in
+from roam.output.formatter import abbrev_kind, loc, format_table, to_json, json_envelope
 from roam.commands.resolve import ensure_index
 
 
@@ -144,52 +144,64 @@ _CALLEE_DECAY = [1.0, 0.5, 0.25]  # distance decay per hop
 def _callee_chain_domain(conn, symbol_id, domains, max_depth=3):
     """Walk callee graph up to max_depth hops, find strongest domain match.
 
-    Returns (effective_weight, domain_match, via_symbol_name, chain_names).
+    Returns (effective_weight, domain_match, via_symbol_name, chain_path).
+    ``chain_path`` is a list of symbol names from source to matched callee.
     """
     best_weight = 0
     best_match = ""
     best_via = ""
-    best_chain = []
+    best_chain: list[str] = []
 
-    # BFS through callees
+    # BFS through callees — track parent pointers for chain reconstruction
     visited = {symbol_id}
+    parent: dict[int, int] = {}           # child_id -> parent_id
+    id_to_name: dict[int, str] = {}
     frontier = [symbol_id]
-    frontier_paths = {symbol_id: []}
+
     for depth in range(min(max_depth, len(_CALLEE_DECAY))):
         if not frontier:
             break
-        placeholders = ",".join("?" for _ in frontier)
-        callees = conn.execute(
-            f"SELECT e.source_id, e.target_id, s.name FROM edges e "
-            f"JOIN symbols s ON e.target_id = s.id "
-            f"WHERE e.source_id IN ({placeholders}) "
-            f"AND e.kind IN ('call', 'uses')",
+        callees = batched_in(
+            conn,
+            "SELECT e.target_id, s.name FROM edges e "
+            "JOIN symbols s ON e.target_id = s.id "
+            "WHERE e.source_id IN ({ph}) "
+            "AND e.kind IN ('call', 'uses')",
             frontier,
-        ).fetchall()
+        )
         next_frontier = []
-        next_paths = {}
-        for source_id, callee_id, callee_name in callees:
+        for callee_id, callee_name in callees:
             if callee_id in visited:
                 continue
             visited.add(callee_id)
-            parent_path = frontier_paths.get(source_id, [])
-            chain = parent_path + [callee_name]
+            id_to_name[callee_id] = callee_name
+            # Record first parent only (BFS guarantees shortest path)
+            if callee_id not in parent:
+                # find which frontier node led here
+                for fid in frontier:
+                    parent[callee_id] = fid
+                    break
+
             w, m = _match_domain(callee_name, domains)
             if w <= 1:
-                # No meaningful domain match on this callee
                 next_frontier.append(callee_id)
-                next_paths[callee_id] = chain
                 continue
             effective = w * _CALLEE_DECAY[depth]
             if effective > best_weight:
                 best_weight = effective
                 best_match = m
                 best_via = callee_name
+                # Reconstruct chain
+                chain = [callee_name]
+                cur = callee_id
+                while cur in parent:
+                    cur = parent[cur]
+                    if cur in id_to_name:
+                        chain.append(id_to_name[cur])
+                chain.reverse()
                 best_chain = chain
             next_frontier.append(callee_id)
-            next_paths[callee_id] = chain
         frontier = next_frontier
-        frontier_paths = next_paths
 
     return best_weight, best_match, best_via, best_chain
 
@@ -198,8 +210,7 @@ def _callee_chain_domain(conn, symbol_id, domains, max_depth=3):
 @click.option('-n', 'count', default=30, help='Number of symbols to show')
 @click.option('--domain', 'domain_keywords', default=None,
               help='Comma-separated high-weight domain keywords (e.g. "payment,tax,ledger")')
-@click.option('--explain', is_flag=True,
-              help='Show full match chains for callee-source domain matches')
+@click.option('--explain', is_flag=True, help='Show full callee-chain reasoning per symbol')
 @click.pass_context
 def risk(ctx, count, domain_keywords, explain):
     """Show domain-weighted risk ranking of symbols.
@@ -246,9 +257,8 @@ def risk(ctx, count, domain_keywords, explain):
 
         if not rows:
             if json_mode:
-                click.echo(to_json(json_envelope(
-                    "risk",
-                    summary={"count": 0},
+                click.echo(to_json(json_envelope("risk",
+                    summary={"items": 0, "max_risk": 0},
                     items=[],
                 )))
             else:
@@ -256,12 +266,12 @@ def risk(ctx, count, domain_keywords, explain):
             return
 
         # Compute static risk (0-10 scale)
-        max_total = max((r["in_degree"] + r["out_degree"]) for r in rows) or 1
+        max_total = max(((r["in_degree"] or 0) + (r["out_degree"] or 0)) for r in rows) or 1
         max_bw = max((r["betweenness"] or 0) for r in rows) or 1
 
         scored = []
         for r in rows:
-            total_deg = r["in_degree"] + r["out_degree"]
+            total_deg = (r["in_degree"] or 0) + (r["out_degree"] or 0)
             bw = r["betweenness"] or 0
 
             # Static risk: weighted combination of degree and betweenness
@@ -322,35 +332,62 @@ def risk(ctx, count, domain_keywords, explain):
                 "domain_match": domain_match,
                 "domain_source": domain_source,
                 "domain_desc": domain_desc,
-                "chain": callee_chain if domain_source == "callee" else [],
                 "ui_dampened": ui_dampened,
                 "adjusted_risk": round(adjusted_risk, 1),
-                "in_degree": r["in_degree"],
-                "out_degree": r["out_degree"],
+                "in_degree": r["in_degree"] or 0,
+                "out_degree": r["out_degree"] or 0,
+                "betweenness": round(bw, 1),
+                "callee_chain": callee_chain,
+                "callee_via": callee_via,
+                "name_weight": name_weight,
+                "name_match": name_match,
+                "zone_weight": zone_weight,
+                "zone_match": zone_match,
+                "callee_weight": callee_weight,
+                "callee_match": callee_match,
             })
 
         scored.sort(key=lambda x: -x["adjusted_risk"])
         scored = scored[:count]
 
         if json_mode:
-            click.echo(to_json(json_envelope(
-                "risk",
-                summary={"count": len(scored)},
-                items=[
-                    {
-                        "name": s["name"],
-                        "kind": s["kind"],
-                        "static_risk": s["static_risk"],
-                        "domain_weight": s["domain_weight"],
-                        "domain_match": s["domain_match"],
-                        "domain_source": s["domain_source"],
-                        "chain": [s["name"]] + s["chain"] if (explain and s["chain"]) else [],
-                        "ui_dampened": s["ui_dampened"],
-                        "adjusted_risk": s["adjusted_risk"],
-                        "location": loc(s["file_path"], s["line_start"]),
-                    }
-                    for s in scored
-                ],
+            items = []
+            for s in scored:
+                item = {
+                    "name": s["name"],
+                    "kind": s["kind"],
+                    "static_risk": s["static_risk"],
+                    "domain_weight": s["domain_weight"],
+                    "domain_match": s["domain_match"],
+                    "domain_source": s["domain_source"],
+                    "ui_dampened": s["ui_dampened"],
+                    "adjusted_risk": s["adjusted_risk"],
+                    "location": loc(s["file_path"], s["line_start"]),
+                }
+                if explain:
+                    item["in_degree"] = s["in_degree"]
+                    item["out_degree"] = s["out_degree"]
+                    item["betweenness"] = s["betweenness"]
+                    item["chain"] = s["callee_chain"]
+                    item["domain_sources"] = {}
+                    if s["name_weight"] > 1:
+                        item["domain_sources"]["name"] = {
+                            "keyword": s["name_match"], "weight": s["name_weight"],
+                        }
+                    if s["callee_weight"] > 1:
+                        item["domain_sources"]["callee"] = {
+                            "keyword": s["callee_match"],
+                            "weight": s["callee_weight"],
+                            "via": s["callee_via"],
+                        }
+                    if s["zone_weight"] > 1:
+                        item["domain_sources"]["zone"] = {
+                            "pattern": s["zone_match"], "weight": s["zone_weight"],
+                        }
+                items.append(item)
+            click.echo(to_json(json_envelope("risk",
+                summary={"count": len(items), "explain": explain},
+                items=items,
             )))
             return
 
@@ -361,57 +398,58 @@ def risk(ctx, count, domain_keywords, explain):
         click.echo()
 
         if explain:
+            # Detailed per-symbol reasoning
             for s in scored:
-                level = ""
+                flag = ""
                 if s["adjusted_risk"] >= 30:
-                    level = "CRITICAL"
+                    flag = "CRITICAL"
                 elif s["adjusted_risk"] >= 15:
-                    level = "HIGH"
+                    flag = "HIGH"
                 elif s["adjusted_risk"] >= 5:
-                    level = "MEDIUM"
+                    flag = "MEDIUM"
+
+                click.echo(f"{flag:8s}  {s['name']}  (adjusted: {s['adjusted_risk']:.1f})")
+                click.echo(f"  Static risk: {s['static_risk']:.1f} "
+                           f"(fan-in: {s['in_degree']}, fan-out: {s['out_degree']}, "
+                           f"betweenness: {s['betweenness']:.0f})")
+                if s["name_weight"] > 1:
+                    click.echo(f"  Name match: x{s['name_weight']:.4g} ({s['name_match']})")
+                if s["callee_chain"]:
+                    chain_str = " -> ".join(s["callee_chain"])
+                    click.echo(f"  Callee chain: {chain_str} "
+                               f"(matched: {s['callee_match']}, x{s['callee_weight']:.4g})")
+                if s["zone_weight"] > 1:
+                    click.echo(f"  Path zone: {s['zone_match']} (x{s['zone_weight']:.4g})")
+                if s["ui_dampened"]:
+                    click.echo(f"  UI dampened: yes")
+                click.echo(f"  Location: {loc(s['file_path'], s['line_start'])}")
+                click.echo()
+        else:
+            table_rows = []
+            for s in scored:
+                flag = ""
+                if s["adjusted_risk"] >= 30:
+                    flag = "CRITICAL"
+                elif s["adjusted_risk"] >= 15:
+                    flag = "HIGH"
+                elif s["adjusted_risk"] >= 5:
+                    flag = "MEDIUM"
+
                 notes = s["domain_desc"]
                 if s["ui_dampened"]:
                     notes += " [UI dampened]" if notes else "[UI dampened]"
-                click.echo(
-                    f"{abbrev_kind(s['kind'])} {s['name']}  static={s['static_risk']:.1f}  "
-                    f"{notes or 'neutral'}  adjusted={s['adjusted_risk']:.1f}  {level}  "
-                    f"{loc(s['file_path'], s['line_start'])}"
-                )
-                if s["domain_source"] == "callee" and s["chain"]:
-                    chain = " -> ".join([s["name"]] + s["chain"])
-                    click.echo(f"  Chain: {chain}")
-                    click.echo(
-                        f"  Match: \"{s['domain_match']}\" keyword at depth {len(s['chain'])} "
-                        f"via {s['chain'][-1]}"
-                    )
-                click.echo()
-            return
 
-        table_rows = []
-        for s in scored:
-            flag = ""
-            if s["adjusted_risk"] >= 30:
-                flag = "CRITICAL"
-            elif s["adjusted_risk"] >= 15:
-                flag = "HIGH"
-            elif s["adjusted_risk"] >= 5:
-                flag = "MEDIUM"
+                table_rows.append([
+                    abbrev_kind(s["kind"]),
+                    s["name"],
+                    f"{s['static_risk']:.1f}",
+                    notes,
+                    f"{s['adjusted_risk']:.1f}",
+                    flag,
+                    loc(s["file_path"], s["line_start"]),
+                ])
 
-            notes = s["domain_desc"]
-            if s["ui_dampened"]:
-                notes += " [UI dampened]" if notes else "[UI dampened]"
-
-            table_rows.append([
-                abbrev_kind(s["kind"]),
-                s["name"],
-                f"{s['static_risk']:.1f}",
-                notes,
-                f"{s['adjusted_risk']:.1f}",
-                flag,
-                loc(s["file_path"], s["line_start"]),
-            ])
-
-        click.echo(format_table(
-            ["Kind", "Name", "Static", "Domain", "Adjusted", "Level", "Location"],
-            table_rows,
-        ))
+            click.echo(format_table(
+                ["Kind", "Name", "Static", "Domain", "Adjusted", "Level", "Location"],
+                table_rows,
+            ))

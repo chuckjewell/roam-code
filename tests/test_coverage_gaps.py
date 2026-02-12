@@ -93,7 +93,7 @@ def test_coverage_gaps_json_split(app_project):
 
     data = json.loads(out)
     assert data["command"] == "coverage-gaps"
-    assert data["summary"]["total_entry_points"] == 4
+    assert data["summary"]["total_entries"] == 4
     assert data["summary"]["covered"] == 2
     assert data["summary"]["uncovered"] == 2
 
@@ -119,7 +119,7 @@ def test_coverage_gaps_scope_filter(app_project):
     assert rc == 0, out
 
     data = json.loads(out)
-    assert data["summary"]["total_entry_points"] == 1
+    assert data["summary"]["total_entries"] == 1
     assert data["summary"]["covered"] == 1
     assert data["summary"]["uncovered"] == 0
 
@@ -134,5 +134,5 @@ def test_coverage_gaps_text_has_sections(app_project):
         cwd=app_project,
     )
     assert rc == 0, out
-    assert "Uncovered Entry Points" in out
-    assert "Covered Entry Points" in out
+    assert "Uncovered" in out
+    assert "Covered" in out

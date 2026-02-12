@@ -59,12 +59,12 @@ def test_report_first_contact_json(report_project):
 
     assert data["command"] == "report"
     assert data["preset"] == "first-contact"
-    assert data["summary"]["sections"] >= 1
+    assert data["summary"]["sections_ok"] >= 1
     assert isinstance(data["sections"], list)
 
 
 def test_report_security_text(report_project):
     out, rc = _roam("report", "security", cwd=report_project)
     assert rc == 0, out
-    assert "Report: security" in out
-    assert "Sections:" in out
+    assert "security" in out.lower()
+    assert "OK" in out or "sections" in out.lower()

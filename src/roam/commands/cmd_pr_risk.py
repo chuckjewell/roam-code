@@ -1,7 +1,5 @@
 """Compute risk score for pending changes."""
 
-import os
-import sqlite3
 import subprocess
 
 import click
@@ -9,51 +7,10 @@ import click
 from roam.db.connection import open_db, find_project_root
 from roam.output.formatter import format_table, to_json, json_envelope
 from roam.commands.resolve import ensure_index
-
-
-_TEST_NAME_PATS = ["test_", "_test.", ".test.", ".spec."]
-_TEST_DIR_PATS = ["tests/", "test/", "__tests__/", "spec/"]
-
-
-def _is_test_file(path):
-    p = path.replace("\\", "/")
-    bn = os.path.basename(p)
-    return any(pat in bn for pat in _TEST_NAME_PATS) or any(d in p for d in _TEST_DIR_PATS)
-
-
-_LOW_RISK_EXTS = {".md", ".txt", ".rst", ".json", ".yaml", ".yml", ".toml",
-                   ".ini", ".cfg", ".lock", ".xml", ".svg", ".png", ".jpg",
-                   ".gif", ".ico", ".csv", ".env"}
-
-
-def _is_low_risk_file(path):
-    """Check if a file is docs/config/asset with dampened risk contribution."""
-    p = path.replace("\\", "/").lower()
-    _, ext = os.path.splitext(p)
-    return ext in _LOW_RISK_EXTS
-
-
-def _get_changed_files(root, staged, commit_range=None):
-    """Get list of changed files from git diff."""
-    cmd = ["git", "diff", "--name-only"]
-    if commit_range:
-        cmd.append(commit_range)
-    elif staged:
-        cmd.append("--cached")
-    try:
-        result = subprocess.run(
-            cmd, cwd=str(root), capture_output=True, text=True,
-            timeout=10, encoding="utf-8", errors="replace",
-        )
-        if result.returncode != 0:
-            return []
-        return [
-            p.replace("\\", "/")
-            for p in result.stdout.strip().splitlines()
-            if p.strip()
-        ]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
+from roam.commands.changed_files import (
+    get_changed_files, resolve_changed_to_db, is_test_file, is_low_risk_file,
+)
+from roam.commands.cmd_coupling import _compute_surprise
 
 
 def _get_file_stat(root, path):
@@ -76,57 +33,6 @@ def _get_file_stat(root, path):
     return 0, 0
 
 
-def _hypergraph_novelty(conn, changed_file_ids):
-    """Return (novelty_score, exact_support, best_overlap) for changed file set.
-
-    novelty_score: 0.0 = common historical pattern, 1.0 = unseen pattern.
-    exact_support: Number of historical commits with the exact same file set.
-    best_overlap: Best Jaccard overlap against any historical change-set.
-    """
-    if len(changed_file_ids) < 2:
-        return 0.0, 0, 1.0
-
-    try:
-        rows = conn.execute(
-            "SELECT gm.hyperedge_id, gm.file_id "
-            "FROM git_hyperedge_members gm "
-            "JOIN git_hyperedges gh ON gh.id = gm.hyperedge_id "
-            "WHERE gh.file_count >= 2 "
-            "ORDER BY gm.hyperedge_id"
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # Older indexes may not have hyperedge tables yet.
-        return 1.0, 0, 0.0
-
-    if not rows:
-        return 1.0, 0, 0.0
-
-    patterns = {}
-    grouped = {}
-    for r in rows:
-        grouped.setdefault(r["hyperedge_id"], set()).add(r["file_id"])
-    for members in grouped.values():
-        key = tuple(sorted(members))
-        patterns[key] = patterns.get(key, 0) + 1
-
-    changed = set(changed_file_ids)
-    changed_key = tuple(sorted(changed))
-    exact_support = patterns.get(changed_key, 0)
-
-    best_overlap = 0.0
-    for key in patterns:
-        other = set(key)
-        union = changed | other
-        if not union:
-            continue
-        overlap = len(changed & other) / len(union)
-        if overlap > best_overlap:
-            best_overlap = overlap
-
-    novelty = max(0.0, 1.0 - best_overlap)
-    return novelty, exact_support, best_overlap
-
-
 @click.command("pr-risk")
 @click.argument('commit_range', required=False, default=None)
 @click.option('--staged', is_flag=True, help='Analyze staged changes')
@@ -144,74 +50,24 @@ def pr_risk(ctx, commit_range, staged):
     ensure_index()
     root = find_project_root()
 
-    changed = _get_changed_files(root, staged, commit_range)
+    changed = get_changed_files(root, staged=staged, commit_range=commit_range)
     if not changed:
         label = commit_range or ("staged" if staged else "unstaged")
         if json_mode:
-            click.echo(to_json(json_envelope(
-                "pr-risk",
-                summary={"label": label, "risk_score": 0, "risk_level": "LOW"},
-                label=label,
-                risk_score=0,
-                risk_level="LOW",
-                changed_files=0,
-                blast_radius_pct=0,
-                hotspot_score=0,
-                test_coverage_pct=0,
-                bus_factor_risk=0,
-                coupling_score=0,
-                hypergraph_novelty_score=0,
-                historical_pattern_support=0,
-                best_pattern_overlap=0,
-                dead_exports=0,
-                per_file=[],
-                suggested_reviewers=[],
-                dead_code=[],
-                message="No changes found",
-            )))
+            click.echo(to_json({"label": label, "risk_score": 0,
+                                "message": "No changes found"}))
         else:
             click.echo(f"No changes found for {label}.")
         return
 
     with open_db(readonly=True) as conn:
         # Map changed files to DB
-        file_map = {}
-        for path in changed:
-            row = conn.execute(
-                "SELECT id, path FROM files WHERE path = ?", (path,)
-            ).fetchone()
-            if not row:
-                row = conn.execute(
-                    "SELECT id, path FROM files WHERE path LIKE ? LIMIT 1",
-                    (f"%{path}",),
-                ).fetchone()
-            if row:
-                file_map[row["path"]] = row["id"]
+        file_map = resolve_changed_to_db(conn, changed)
 
         if not file_map:
             if json_mode:
-                label = commit_range or ("staged" if staged else "unstaged")
-                click.echo(to_json(json_envelope(
-                    "pr-risk",
-                    summary={"label": label, "risk_score": 0, "risk_level": "LOW"},
-                    label=label,
-                    risk_score=0,
-                    risk_level="LOW",
-                    changed_files=0,
-                    blast_radius_pct=0,
-                    hotspot_score=0,
-                    test_coverage_pct=0,
-                    bus_factor_risk=0,
-                    coupling_score=0,
-                    hypergraph_novelty_score=0,
-                    historical_pattern_support=0,
-                    best_pattern_overlap=0,
-                    dead_exports=0,
-                    per_file=[],
-                    suggested_reviewers=[],
-                    dead_code=[],
-                    message="Changed files not in index",
-                )))
+                click.echo(to_json({"risk_score": 0,
+                                    "message": "Changed files not in index"}))
             else:
                 click.echo("Changed files not found in index. Run `roam index` first.")
             return
@@ -256,7 +112,7 @@ def pr_risk(ctx, commit_range, staged):
 
         if churn_data:
             # Compare against repo median churn — exclude docs/config files
-            code_churn = {p: d for p, d in churn_data.items() if not _is_low_risk_file(p)}
+            code_churn = {p: d for p, d in churn_data.items() if not is_low_risk_file(p)}
             all_churn = conn.execute(
                 "SELECT total_churn FROM file_stats ORDER BY total_churn"
             ).fetchall()
@@ -270,7 +126,7 @@ def pr_risk(ctx, commit_range, staged):
         bus_factor_risk = 0.0
         bus_factors = []
         for path, fid in file_map.items():
-            if _is_test_file(path) or _is_low_risk_file(path):
+            if is_test_file(path) or is_low_risk_file(path):
                 continue
             authors = conn.execute(
                 "SELECT DISTINCT gc.author FROM git_file_changes gfc "
@@ -292,7 +148,7 @@ def pr_risk(ctx, commit_range, staged):
         # --- 4. Test coverage ---
         test_coverage = 0.0
         source_files = [p for p in file_map
-                        if not _is_test_file(p) and not _is_low_risk_file(p)]
+                        if not is_test_file(p) and not is_low_risk_file(p)]
         covered_files = 0
         for path in source_files:
             fid = file_map[path]
@@ -303,7 +159,7 @@ def pr_risk(ctx, commit_range, staged):
                 "WHERE fe.target_file_id = ?",
                 (fid,),
             ).fetchall()
-            has_test = any(_is_test_file(r["path"]) for r in conn.execute(
+            has_test = any(is_test_file(r["path"]) for r in conn.execute(
                 "SELECT f.path FROM file_edges fe "
                 "JOIN files f ON fe.source_file_id = f.id "
                 "WHERE fe.target_file_id = ?", (fid,),
@@ -328,15 +184,40 @@ def pr_risk(ctx, commit_range, staged):
             if max_possible > 0:
                 coupling_score = min(1.0, cross_edges / max_possible)
 
-        # --- 5b. Hypergraph pattern novelty ---
-        hypergraph_novelty, pattern_support, pattern_overlap = _hypergraph_novelty(
-            conn, set(file_map.values())
-        )
+        # --- 6. Hypergraph novelty ---
+        change_fids = list(file_map.values())
+        novelty, closest_pattern, closest_sim = _compute_surprise(conn, change_fids)
 
-        # --- 6. Dead code check ---
+        # --- 7. Structural spread (cluster + layer) ---
+        cluster_ids = set()
+        for fid in file_map.values():
+            for r in conn.execute(
+                "SELECT DISTINCT c.cluster_id FROM clusters c "
+                "JOIN symbols s ON c.symbol_id = s.id "
+                "WHERE s.file_id = ?", (fid,),
+            ).fetchall():
+                cluster_ids.add(r["cluster_id"])
+
+        total_clusters = conn.execute(
+            "SELECT COUNT(DISTINCT cluster_id) FROM clusters"
+        ).fetchone()[0] or 1
+        cluster_spread = len(cluster_ids) / total_clusters if total_clusters > 1 else 0
+
+        # Layer spread
+        from roam.graph.layers import detect_layers
+        layer_map = detect_layers(G)
+        touched_layers = set()
+        if layer_map:
+            for sym_id in changed_sym_ids:
+                if sym_id in layer_map:
+                    touched_layers.add(layer_map[sym_id])
+        total_layers = (max(layer_map.values()) + 1) if layer_map else 1
+        layer_spread = len(touched_layers) / total_layers if total_layers > 1 else 0
+
+        # --- 8. Dead code check ---
         new_dead = []
         for path, fid in file_map.items():
-            if _is_test_file(path):
+            if is_test_file(path):
                 continue
             exports = conn.execute(
                 "SELECT s.name, s.kind FROM symbols s "
@@ -352,10 +233,10 @@ def pr_risk(ctx, commit_range, staged):
         risk = int(
             min(blast_pct, 25) +                      # 0-25: blast radius
             hotspot_score * 20 +                       # 0-20: hotspot
-            (1 - test_coverage) * 25 +                 # 0-25: untested
-            bus_factor_risk * 15 +                     # 0-15: bus factor
+            (1 - test_coverage) * 20 +                 # 0-20: untested
+            bus_factor_risk * 12 +                     # 0-12: bus factor
             coupling_score * 15 +                      # 0-15: coupling
-            hypergraph_novelty * 8                     # 0-8: novel change-set
+            novelty * 8                                # 0-8: change set novelty
         )
         risk = min(risk, 100)
 
@@ -384,14 +265,14 @@ def pr_risk(ctx, commit_range, staged):
                 "symbols": len(syms),
                 "blast": len(file_affected),
                 "churn": churn.get("churn", 0),
-                "is_test": _is_test_file(path),
+                "is_test": is_test_file(path),
             })
         per_file.sort(key=lambda x: x["blast"], reverse=True)
 
         # --- Suggested reviewers ---
         author_lines = {}
         for path, fid in file_map.items():
-            if _is_test_file(path):
+            if is_test_file(path):
                 continue
             rows = conn.execute(
                 "SELECT gc.author, gfc.lines_added FROM git_file_changes gfc "
@@ -404,10 +285,24 @@ def pr_risk(ctx, commit_range, staged):
 
         label = commit_range or ("staged" if staged else "unstaged")
 
+        # Verdict
+        if level == "LOW":
+            verdict = f"Low risk ({risk}/100) — safe to merge"
+        elif level == "MODERATE":
+            verdict = f"Moderate risk ({risk}/100) — review recommended"
+        elif level == "HIGH":
+            verdict = f"High risk ({risk}/100) — careful review needed"
+        else:
+            verdict = f"Critical risk ({risk}/100) — significant blast radius, thorough review required"
+
         if json_mode:
-            click.echo(to_json(json_envelope(
-                "pr-risk",
-                summary={"label": label, "risk_score": risk, "risk_level": level},
+            click.echo(to_json(json_envelope("pr-risk",
+                summary={
+                    "verdict": verdict,
+                    "risk_score": risk,
+                    "risk_level": level,
+                    "changed_files": len(file_map),
+                },
                 label=label,
                 risk_score=risk,
                 risk_level=level,
@@ -417,9 +312,15 @@ def pr_risk(ctx, commit_range, staged):
                 test_coverage_pct=round(test_coverage * 100, 1),
                 bus_factor_risk=round(bus_factor_risk, 2),
                 coupling_score=round(coupling_score, 2),
-                hypergraph_novelty_score=round(hypergraph_novelty, 2),
-                historical_pattern_support=pattern_support,
-                best_pattern_overlap=round(pattern_overlap, 2),
+                novelty_score=novelty,
+                closest_similarity=closest_sim,
+                closest_historical_pattern=closest_pattern,
+                cluster_spread=round(cluster_spread, 2),
+                clusters_touched=len(cluster_ids),
+                total_clusters=total_clusters,
+                layer_spread=round(layer_spread, 2),
+                layers_touched=len(touched_layers),
+                total_layers=total_layers,
                 dead_exports=len(new_dead),
                 per_file=per_file,
                 suggested_reviewers=[
@@ -430,6 +331,7 @@ def pr_risk(ctx, commit_range, staged):
             return
 
         # --- Text output ---
+        click.echo(f"VERDICT: {verdict}\n")
         click.echo(f"=== PR Risk ({label}) ===\n")
         click.echo(f"Risk Score: {risk}/100 ({level})")
         click.echo()
@@ -441,8 +343,12 @@ def pr_risk(ctx, commit_range, staged):
         click.echo(f"  Bus factor:    {'RISK' if bus_factor_risk >= 0.5 else 'ok':>5s}  "
                     f"{'(single-author file!)' if bus_factor_risk >= 1.0 else ''}")
         click.echo(f"  Coupling:      {coupling_score * 100:5.1f}%")
-        click.echo(f"  Pattern nov.:  {hypergraph_novelty * 100:5.1f}%  "
-                    f"(best overlap {pattern_overlap * 100:.0f}%, support {pattern_support})")
+        click.echo(f"  Novelty:       {novelty * 100:5.1f}%"
+                    f"{'  (unfamiliar change combination!)' if novelty > 0.7 else ''}")
+        if total_clusters > 1:
+            click.echo(f"  Cluster spread: {len(cluster_ids)}/{total_clusters} clusters touched")
+        if total_layers > 1:
+            click.echo(f"  Layer spread:   {len(touched_layers)}/{total_layers} layers touched")
         click.echo()
 
         # Per-file table

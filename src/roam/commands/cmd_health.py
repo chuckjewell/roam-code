@@ -1,14 +1,17 @@
 """Detect and report code health issues."""
 
+from __future__ import annotations
+
 import click
 
-from roam.db.connection import open_db
+from roam.db.connection import open_db, batched_in
 from roam.db.queries import TOP_BY_DEGREE, TOP_BY_BETWEENNESS
 from roam.graph.builder import build_symbol_graph
-from roam.graph.cycles import find_cycles, format_cycles
+from roam.graph.cycles import find_cycles, find_weakest_edge, format_cycles
 from roam.graph.layers import detect_layers, find_violations
 from roam.output.formatter import (
-    abbrev_kind, loc, section, format_table, truncate_lines, to_json, json_envelope,
+    abbrev_kind, loc, section, format_table, truncate_lines, to_json,
+    json_envelope,
 )
 from roam.commands.resolve import ensure_index
 
@@ -92,6 +95,26 @@ def health(ctx, no_framework):
         cycles = find_cycles(G)
         formatted_cycles = format_cycles(cycles, conn) if cycles else []
 
+        # --- Cycle break suggestions ---
+        break_suggestions: list[dict] = []
+        for scc in cycles:
+            if len(scc) < 3:
+                continue
+            result = find_weakest_edge(G, scc)
+            if result is None:
+                continue
+            src_id, tgt_id, reason = result
+            src_name = G.nodes[src_id].get("name", "?") if src_id in G else "?"
+            tgt_name = G.nodes[tgt_id].get("name", "?") if tgt_id in G else "?"
+            break_suggestions.append({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "source_name": src_name,
+                "target_name": tgt_name,
+                "reason": reason,
+                "scc_size": len(scc),
+            })
+
         # --- God components ---
         degree_rows = conn.execute(TOP_BY_DEGREE, (50,)).fetchall()
         god_items = []
@@ -139,12 +162,12 @@ def health(ctx, no_framework):
         v_lookup = {}
         if violations:
             all_ids = {v["source"] for v in violations} | {v["target"] for v in violations}
-            ph = ",".join("?" for _ in all_ids)
-            for r in conn.execute(
-                f"SELECT s.id, s.name, f.path as file_path "
-                f"FROM symbols s JOIN files f ON s.file_id = f.id WHERE s.id IN ({ph})",
+            for r in batched_in(
+                conn,
+                "SELECT s.id, s.name, f.path as file_path "
+                "FROM symbols s JOIN files f ON s.file_id = f.id WHERE s.id IN ({ph})",
                 list(all_ids),
-            ).fetchall():
+            ):
                 v_lookup[r["id"]] = r
 
         # ---- Classify issue severity (location-aware) ----
@@ -226,11 +249,53 @@ def health(ctx, no_framework):
             v["severity"] = "WARNING"
             sev_counts["WARNING"] += 1
 
+        # --- Tangle ratio ---
+        total_symbols = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()[0] or 1
+        cycle_symbol_ids = set()
+        for scc in cycles:
+            cycle_symbol_ids.update(scc)
+        tangle_ratio = round(len(cycle_symbol_ids) / total_symbols * 100, 1)
+
+        # --- Composite health score (0-100) ---
+        health_score = 100
+        health_score -= min(30, tangle_ratio * 1.5)
+        god_critical = sum(1 for g in god_items if g.get("severity") == "CRITICAL")
+        health_score -= min(20, god_critical * 5 + len(god_items) * 1)
+        bn_critical = sum(1 for b in bn_items if b.get("severity") == "CRITICAL")
+        health_score -= min(15, bn_critical * 3 + len(bn_items) * 0.5)
+        health_score -= min(15, len(violations) * 2)
+        try:
+            avg_file_health = conn.execute(
+                "SELECT AVG(health_score) FROM file_stats WHERE health_score IS NOT NULL"
+            ).fetchone()[0]
+            if avg_file_health is not None:
+                health_score -= max(0, (10 - avg_file_health) * 2)
+        except Exception:
+            pass
+        health_score = max(0, min(100, int(health_score)))
+
+        # --- Verdict ---
+        if health_score >= 80:
+            verdict = f"Healthy codebase ({health_score}/100) — {sev_counts['CRITICAL']} critical issues"
+        elif health_score >= 60:
+            verdict = f"Fair codebase ({health_score}/100) — {sev_counts['CRITICAL']} critical, {sev_counts['WARNING']} warnings"
+        elif health_score >= 40:
+            verdict = f"Needs attention ({health_score}/100) — {sev_counts['CRITICAL']} critical, {sev_counts['WARNING']} warnings"
+        else:
+            verdict = f"Unhealthy codebase ({health_score}/100) — {sev_counts['CRITICAL']} critical, {sev_counts['WARNING']} warnings"
+
         if json_mode:
             j_issue_count = len(cycles) + len(god_items) + len(bn_items) + len(violations)
-            click.echo(to_json(json_envelope(
-                "health",
-                summary={"issue_count": j_issue_count, "severity": sev_counts},
+            click.echo(to_json(json_envelope("health",
+                summary={
+                    "verdict": verdict,
+                    "health_score": health_score,
+                    "tangle_ratio": tangle_ratio,
+                    "issue_count": j_issue_count,
+                    "severity": sev_counts,
+                },
+                health_score=health_score,
+                tangle_ratio=tangle_ratio,
                 issue_count=j_issue_count,
                 severity=sev_counts,
                 framework_filtered=filtered_count,
@@ -242,6 +307,15 @@ def health(ctx, no_framework):
                      "symbols": [s["name"] for s in c["symbols"]],
                      "files": c["files"]}
                     for c in formatted_cycles
+                ],
+                cycle_break_suggestions=[
+                    {
+                        "source": bs["source_name"],
+                        "target": bs["target_name"],
+                        "reason": bs["reason"],
+                        "scc_size": bs["scc_size"],
+                    }
+                    for bs in break_suggestions
                 ],
                 god_components=[
                     {**g, "severity": g["severity"], "category": g["category"]}
@@ -271,6 +345,7 @@ def health(ctx, no_framework):
             return
 
         # --- Text output ---
+        click.echo(f"VERDICT: {verdict}\n")
         issue_count = len(cycles) + len(god_items) + len(bn_items) + len(violations)
         parts = []
         if cycles:
@@ -285,8 +360,11 @@ def health(ctx, no_framework):
             parts.append(bn_detail)
         if violations:
             parts.append(f"{len(violations)} layer violation{'s' if len(violations) != 1 else ''}")
+        click.echo(f"Health Score: {health_score}/100  |  "
+                   f"Tangle: {tangle_ratio}% ({len(cycle_symbol_ids)}/{total_symbols} symbols in cycles)")
+        click.echo()
         if issue_count == 0:
-            click.echo("Health: No issues detected")
+            click.echo("Issues: None detected")
         else:
             sev_parts = []
             if sev_counts["CRITICAL"]:
@@ -314,6 +392,15 @@ def health(ctx, no_framework):
                     click.echo(f"    (+{len(names) - 10} more)")
                 click.echo(f"    files: {', '.join(cyc['files'][:5])}")
             click.echo(f"  total: {len(cycles)} cycle(s)")
+            if break_suggestions:
+                click.echo()
+                click.echo("  Cycle break suggestions:")
+                for bs in break_suggestions:
+                    click.echo(
+                        f"    Break: remove dependency "
+                        f"{bs['source_name']} -> {bs['target_name']} "
+                        f"({bs['reason']})"
+                    )
         else:
             click.echo("  (none)")
 

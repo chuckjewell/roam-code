@@ -1,11 +1,15 @@
 """Show topological layer detection and violations."""
 
+from __future__ import annotations
+
+from collections import Counter
+
 import click
 
-from roam.db.connection import open_db
+from roam.db.connection import open_db, batched_in
 from roam.graph.builder import build_symbol_graph
 from roam.graph.layers import detect_layers, find_violations, format_layers
-from roam.output.formatter import abbrev_kind, loc, format_table, truncate_lines, to_json
+from roam.output.formatter import abbrev_kind, loc, format_table, truncate_lines, to_json, json_envelope
 from roam.commands.resolve import ensure_index
 
 import networkx as nx
@@ -23,7 +27,10 @@ def layers(ctx):
 
         if not layer_map:
             if json_mode:
-                click.echo(to_json({"layers": [], "violations": []}))
+                click.echo(to_json(json_envelope("layers",
+                    summary={"total_layers": 0, "violations": 0},
+                    layers=[], violations=[],
+                )))
             else:
                 click.echo("No layers detected (graph is empty).")
             return
@@ -38,15 +45,13 @@ def layers(ctx):
             v_lookup = {}
             if violations:
                 all_ids = list({v["source"] for v in violations} | {v["target"] for v in violations})
-                for i in range(0, len(all_ids), 500):
-                    batch = all_ids[i:i+500]
-                    ph = ",".join("?" for _ in batch)
-                    for r in conn.execute(
-                        f"SELECT s.id, s.name, f.path as file_path "
-                        f"FROM symbols s JOIN files f ON s.file_id = f.id WHERE s.id IN ({ph})",
-                        batch,
-                    ).fetchall():
-                        v_lookup[r["id"]] = r
+                for r in batched_in(
+                    conn,
+                    "SELECT s.id, s.name, f.path as file_path "
+                    "FROM symbols s JOIN files f ON s.file_id = f.id WHERE s.id IN ({ph})",
+                    all_ids,
+                ):
+                    v_lookup[r["id"]] = r
 
             # Build directory breakdown for large layers (JSON)
             layer_dirs = {}
@@ -54,20 +59,28 @@ def layers(ctx):
                 if len(l["symbols"]) > 50:
                     lids = [nid for nid, lv in layer_map.items() if lv == l["layer"]]
                     if lids:
-                        ph = ",".join("?" for _ in lids)
-                        dr = conn.execute(
-                            f"SELECT CASE WHEN INSTR(REPLACE(f.path, '\\', '/'), '/') > 0 "
-                            f"THEN SUBSTR(REPLACE(f.path, '\\', '/'), 1, INSTR(REPLACE(f.path, '\\', '/'), '/') - 1) "
-                            f"ELSE '.' END as dir, COUNT(*) as cnt "
-                            f"FROM symbols s JOIN files f ON s.file_id = f.id "
-                            f"WHERE s.id IN ({ph}) GROUP BY dir ORDER BY cnt DESC LIMIT 5",
+                        dr = batched_in(
+                            conn,
+                            "SELECT CASE WHEN INSTR(REPLACE(f.path, '\\', '/'), '/') > 0 "
+                            "THEN SUBSTR(REPLACE(f.path, '\\', '/'), 1, INSTR(REPLACE(f.path, '\\', '/'), '/') - 1) "
+                            "ELSE '.' END as dir "
+                            "FROM symbols s JOIN files f ON s.file_id = f.id "
+                            "WHERE s.id IN ({ph})",
                             lids,
-                        ).fetchall()
-                        layer_dirs[l["layer"]] = [{"dir": r["dir"], "count": r["cnt"]} for r in dr]
+                        )
+                        dir_counts = Counter(r["dir"] for r in dr)
+                        layer_dirs[l["layer"]] = [
+                            {"dir": d, "count": c}
+                            for d, c in dir_counts.most_common(5)
+                        ]
 
-            click.echo(to_json({
-                "total_layers": max_layer + 1,
-                "layers": [
+            click.echo(to_json(json_envelope("layers",
+                summary={
+                    "total_layers": max_layer + 1,
+                    "violations": len(violations),
+                },
+                total_layers=max_layer + 1,
+                layers=[
                     {
                         "layer": l["layer"],
                         "symbol_count": len(l["symbols"]),
@@ -79,7 +92,7 @@ def layers(ctx):
                     }
                     for l in formatted
                 ],
-                "violations": [
+                violations=[
                     {
                         "source": v_lookup.get(v["source"], {}).get("name", "?"),
                         "source_layer": v["source_layer"],
@@ -88,7 +101,7 @@ def layers(ctx):
                     }
                     for v in violations
                 ],
-            }))
+            )))
             return
 
         total_symbols = sum(len(l["symbols"]) for l in formatted)
@@ -116,32 +129,35 @@ def layers(ctx):
                 click.echo(f"\n  Layer {n} ({len(symbols)} symbols):{label}")
                 layer_ids = [nid for nid, l in layer_map.items() if l == n]
                 if layer_ids:
-                    ph = ",".join("?" for _ in layer_ids)
                     # Directory breakdown for large layers
-                    dir_rows = conn.execute(
-                        f"SELECT CASE WHEN INSTR(REPLACE(f.path, '\\', '/'), '/') > 0 "
-                        f"THEN SUBSTR(REPLACE(f.path, '\\', '/'), 1, INSTR(REPLACE(f.path, '\\', '/'), '/') - 1) "
-                        f"ELSE '.' END as dir, COUNT(*) as cnt "
-                        f"FROM symbols s JOIN files f ON s.file_id = f.id "
-                        f"WHERE s.id IN ({ph}) GROUP BY dir ORDER BY cnt DESC",
+                    dir_rows = batched_in(
+                        conn,
+                        "SELECT CASE WHEN INSTR(REPLACE(f.path, '\\', '/'), '/') > 0 "
+                        "THEN SUBSTR(REPLACE(f.path, '\\', '/'), 1, INSTR(REPLACE(f.path, '\\', '/'), '/') - 1) "
+                        "ELSE '.' END as dir "
+                        "FROM symbols s JOIN files f ON s.file_id = f.id "
+                        "WHERE s.id IN ({ph})",
                         layer_ids,
-                    ).fetchall()
+                    )
                     if dir_rows:
+                        dir_counts = Counter(r["dir"] for r in dir_rows)
                         parts = []
-                        for dr in dir_rows[:5]:
-                            pct = dr["cnt"] * 100 / len(layer_ids)
-                            parts.append(f"{dr['dir']}/ {pct:.0f}%")
+                        for d, cnt in dir_counts.most_common(5):
+                            pct = cnt * 100 / len(layer_ids)
+                            parts.append(f"{d}/ {pct:.0f}%")
                         click.echo(f"    Dirs: {', '.join(parts)}")
                     # Top 5 symbols by PageRank
-                    top_syms = conn.execute(
-                        f"SELECT s.name, s.kind FROM symbols s "
-                        f"LEFT JOIN graph_metrics gm ON s.id = gm.symbol_id "
-                        f"WHERE s.id IN ({ph}) "
-                        f"ORDER BY COALESCE(gm.pagerank, 0) DESC LIMIT 5",
+                    top_syms = batched_in(
+                        conn,
+                        "SELECT s.name, s.kind, COALESCE(gm.pagerank, 0) as pr "
+                        "FROM symbols s "
+                        "LEFT JOIN graph_metrics gm ON s.id = gm.symbol_id "
+                        "WHERE s.id IN ({ph})",
                         layer_ids,
-                    ).fetchall()
+                    )
                     if top_syms:
-                        names = [f"{abbrev_kind(s['kind'])} {s['name']}" for s in top_syms]
+                        top_syms.sort(key=lambda r: r["pr"], reverse=True)
+                        names = [f"{abbrev_kind(s['kind'])} {s['name']}" for s in top_syms[:5]]
                         click.echo(f"    Top: {', '.join(names)}")
             else:
                 names = [f"{abbrev_kind(s['kind'])} {s['name']}" for s in symbols]
@@ -196,17 +212,14 @@ def layers(ctx):
         if violations:
             all_ids = list({v["source"] for v in violations} | {v["target"] for v in violations})
             lookup = {}
-            for i in range(0, len(all_ids), 500):
-                batch = all_ids[i:i+500]
-                ph = ",".join("?" for _ in batch)
-                rows = conn.execute(
-                    f"SELECT s.id, s.name, s.kind, f.path as file_path "
-                    f"FROM symbols s JOIN files f ON s.file_id = f.id "
-                    f"WHERE s.id IN ({ph})",
-                    batch,
-                ).fetchall()
-                for r in rows:
-                    lookup[r["id"]] = r
+            for r in batched_in(
+                conn,
+                "SELECT s.id, s.name, s.kind, f.path as file_path "
+                "FROM symbols s JOIN files f ON s.file_id = f.id "
+                "WHERE s.id IN ({ph})",
+                all_ids,
+            ):
+                lookup[r["id"]] = r
 
             v_rows = []
             for v in violations[:30]:

@@ -1,107 +1,208 @@
-"""Show structural metric trends from .roam/history.json."""
+"""Display health history with sparklines and CI assertions."""
 
 import re
+import time
+from datetime import datetime, timezone
 
 import click
 
-from roam.commands.metrics_history import load_history
-from roam.db.connection import find_project_root
-from roam.output.formatter import format_table, json_envelope, to_json
+from roam.db.connection import open_db
+from roam.output.formatter import format_table, to_json, json_envelope
+from roam.commands.resolve import ensure_index
+from roam.commands.metrics_history import get_snapshots
 
 
-_ASSERT_RE = re.compile(r"^([a-z_]+)\s*(<=|>=|==|<|>)\s*([0-9]+(?:\.[0-9]+)?)$")
+# ---------------------------------------------------------------------------
+# Sparkline rendering
+# ---------------------------------------------------------------------------
+
+_SPARKS = "▁▂▃▄▅▆▇█"
 
 
-def _evaluate_assertion(latest_metrics: dict, assertion: str) -> tuple[bool, str]:
-    m = _ASSERT_RE.match(assertion.strip())
-    if not m:
-        return False, f"Invalid assertion format: {assertion}"
-    metric, op, rhs_s = m.groups()
-    if metric not in latest_metrics:
-        return False, f"Unknown metric: {metric}"
-    lhs = float(latest_metrics[metric])
-    rhs = float(rhs_s)
-    ok = False
-    if op == "<=":
-        ok = lhs <= rhs
-    elif op == ">=":
-        ok = lhs >= rhs
-    elif op == "<":
-        ok = lhs < rhs
-    elif op == ">":
-        ok = lhs > rhs
-    elif op == "==":
-        ok = lhs == rhs
-    return ok, f"{metric} {lhs:g} {op} {rhs:g}"
+def _sparkline(values):
+    """Render a list of numbers as a terminal sparkline."""
+    if not values:
+        return ""
+    mn, mx = min(values), max(values)
+    rng = mx - mn or 1
+    return "".join(
+        _SPARKS[min(len(_SPARKS) - 1, int((v - mn) / rng * (len(_SPARKS) - 1)))]
+        for v in values
+    )
 
 
-@click.command("trend")
-@click.option("--range", "range_n", default=5, show_default=True, type=int,
-              help="Number of most recent history entries to show")
-@click.option("--assert", "assertions", multiple=True,
-              help="Constraint on latest metrics (e.g. cycles<=8)")
+# ---------------------------------------------------------------------------
+# Assertion engine
+# ---------------------------------------------------------------------------
+
+_ASSERT_RE = re.compile(r"(\w+)\s*(<=|>=|==|!=|<|>)\s*(\d+)")
+_OPS = {
+    "<=": lambda a, b: a <= b,
+    ">=": lambda a, b: a >= b,
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+    "<":  lambda a, b: a < b,
+    ">":  lambda a, b: a > b,
+}
+
+
+def _check_assertions(assertions_str, snap):
+    """Check CI assertions against a snapshot. Returns list of failure strings."""
+    failures = []
+    for expr in assertions_str.split(","):
+        expr = expr.strip()
+        if not expr:
+            continue
+        m = _ASSERT_RE.match(expr)
+        if not m:
+            failures.append(f"invalid expression: {expr}")
+            continue
+        metric, op, threshold = m.group(1), m.group(2), int(m.group(3))
+        actual = snap.get(metric)
+        if actual is None:
+            failures.append(f"unknown metric: {metric}")
+            continue
+        if not _OPS[op](actual, threshold):
+            failures.append(f"{metric}={actual} (expected {op}{threshold})")
+    return failures
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+@click.command()
+@click.option("--range", "count", default=10, help="Number of snapshots to show")
+@click.option("--since", "since_date", default=None,
+              help="Only show snapshots after this date (YYYY-MM-DD)")
+@click.option("--assert", "assertions", default=None,
+              help="CI gate: comma-separated expressions (e.g. 'cycles<=5,dead_exports<=20')")
 @click.pass_context
-def trend(ctx, range_n, assertions):
-    """Show structural trend rows from snapshot/index history."""
-    json_mode = ctx.obj.get("json") if ctx.obj else False
-    root = find_project_root()
-    history = load_history(root)
-    if not history:
-        msg = "No history found. Run `roam snapshot` or `roam index` first."
-        if json_mode:
-            click.echo(to_json(json_envelope("trend", summary={"count": 0}, rows=[], message=msg)))
-        else:
-            click.echo(msg)
-        return
+def trend(ctx, count, since_date, assertions):
+    """Display health trend with sparklines and CI gate assertions.
 
-    rows = history[-range_n:]
-    latest = rows[-1]
-    latest_metrics = latest.get("metrics", {})
+    Shows historical snapshots from `roam index` and `roam snapshot`.
+    Use --assert for CI pipelines to enforce quality thresholds.
+    """
+    json_mode = ctx.obj.get('json') if ctx.obj else False
+    ensure_index()
 
-    assertion_results = []
-    failed = False
-    for a in assertions:
-        ok, detail = _evaluate_assertion(latest_metrics, a)
-        assertion_results.append({"assertion": a, "ok": ok, "detail": detail})
-        if not ok:
-            failed = True
-
-    if json_mode:
-        click.echo(to_json(json_envelope(
-            "trend",
-            summary={"count": len(rows)},
-            rows=rows,
-            assertions=assertion_results,
-        )))
-        if failed:
+    since_ts = None
+    if since_date:
+        try:
+            dt = datetime.strptime(since_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            since_ts = int(dt.timestamp())
+        except ValueError:
+            click.echo(f"Invalid date format: {since_date} (use YYYY-MM-DD)")
             raise SystemExit(1)
-        return
 
-    click.echo(f"=== Health Trend (last {len(rows)} snapshots) ===")
-    table_rows = []
-    for e in rows:
-        m = e.get("metrics", {})
-        tag = e.get("tag") or e.get("source") or ""
-        table_rows.append([
-            e.get("timestamp", "")[:10],
-            tag,
-            str(m.get("cycles", 0)),
-            str(m.get("god_components", 0)),
-            str(m.get("bottlenecks", 0)),
-            str(m.get("dead_exports", 0)),
-            str(m.get("weather_top_score", 0)),
-        ])
-    click.echo(format_table(
-        ["Date", "Tag", "Cycles", "Gods", "Bottlenecks", "Dead", "Weather-Top"],
-        table_rows,
-    ))
+    with open_db(readonly=True) as conn:
+        snaps = get_snapshots(conn, limit=count, since=since_ts)
 
-    if assertion_results:
-        click.echo()
-        for item in assertion_results:
-            if item["ok"]:
-                click.echo(f"Assertion passed: {item['detail']}")
+        if not snaps:
+            if json_mode:
+                click.echo(to_json(json_envelope("trend",
+                    summary={"snapshots": 0},
+                    snapshots=[],
+                )))
             else:
-                click.echo(f"Assertion failed: {item['detail']}")
-        if failed:
-            raise SystemExit(1)
+                click.echo("No snapshots found. Run `roam index` or `roam snapshot` first.")
+            return
+
+        # Convert to dicts for easier access
+        snap_dicts = []
+        for s in snaps:
+            snap_dicts.append({
+                "timestamp": s["timestamp"],
+                "tag": s["tag"],
+                "source": s["source"],
+                "git_branch": s["git_branch"],
+                "git_commit": s["git_commit"],
+                "files": s["files"],
+                "symbols": s["symbols"],
+                "edges": s["edges"],
+                "cycles": s["cycles"],
+                "god_components": s["god_components"],
+                "bottlenecks": s["bottlenecks"],
+                "dead_exports": s["dead_exports"],
+                "layer_violations": s["layer_violations"],
+                "health_score": s["health_score"],
+            })
+
+        # Reverse for chronological order (oldest first for sparklines)
+        chrono = list(reversed(snap_dicts))
+
+        # --- Assertions ---
+        assertion_results = []
+        if assertions:
+            latest = snap_dicts[0]  # newest first
+            assertion_results = _check_assertions(assertions, latest)
+
+        if json_mode:
+            envelope = json_envelope("trend",
+                summary={
+                    "snapshots": len(snap_dicts),
+                    "latest_health": snap_dicts[0]["health_score"] if snap_dicts else None,
+                },
+                snapshots=snap_dicts,
+            )
+            if assertions:
+                envelope["assertions"] = {
+                    "expression": assertions,
+                    "passed": len(assertion_results) == 0,
+                    "failures": assertion_results,
+                }
+            click.echo(to_json(envelope))
+            if assertion_results:
+                raise SystemExit(1)
+            return
+
+        # --- Text output ---
+        click.echo(f"=== Health Trend (last {len(snap_dicts)} snapshots) ===\n")
+
+        # Table
+        rows = []
+        for s in snap_dicts:
+            dt = datetime.fromtimestamp(s["timestamp"], tz=timezone.utc)
+            date_str = dt.strftime("%Y-%m-%d %H:%M")
+            tag = s["tag"] or f"({s['source']})"
+            rows.append([
+                date_str, tag,
+                str(s["health_score"]),
+                str(s["cycles"]),
+                str(s["god_components"]),
+                str(s["bottlenecks"]),
+                str(s["dead_exports"]),
+                str(s["layer_violations"]),
+            ])
+        click.echo(format_table(
+            ["Date", "Tag", "Score", "Cycles", "Gods", "BN", "Dead", "Violations"],
+            rows,
+        ))
+
+        # Sparklines (chronological order)
+        if len(chrono) >= 2:
+            click.echo("\nSparklines:")
+            metrics = [
+                ("Score", "health_score"),
+                ("Cycles", "cycles"),
+                ("Gods", "god_components"),
+                ("Dead", "dead_exports"),
+                ("Violations", "layer_violations"),
+            ]
+            for label, key in metrics:
+                vals = [s[key] or 0 for s in chrono]
+                spark = _sparkline(vals)
+                mn, mx = min(vals), max(vals)
+                click.echo(f"  {label:<12s} {spark}  (range: {mn}-{mx})")
+
+        # Assertions
+        if assertions:
+            click.echo()
+            if assertion_results:
+                click.echo(f"ASSERTIONS FAILED ({len(assertion_results)}):")
+                for f in assertion_results:
+                    click.echo(f"  FAIL: {f}")
+                raise SystemExit(1)
+            else:
+                click.echo("All assertions passed.")

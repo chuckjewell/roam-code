@@ -35,9 +35,20 @@ $ roam diff                      # blast radius of your uncommitted changes
 $ roam health --gate score>=70   # CI quality gate — exit 1 on failure
 ```
 
-## About This Fork
+|  | Without Roam | With Roam |
+|--|-------------|-----------|
+| Tool calls | 8 | **1** |
+| Wall time | ~11s | **<0.5s** |
+| Tokens consumed | ~15,000 | **~3,000** |
 
-This is a fork of [Cranot/roam-code](https://github.com/Cranot/roam-code). Between v4.3.1 and the upstream v7.2.0 release, we independently developed 12 features that were later implemented in upstream — often with improvements. The convergence validated our design instincts while upstream's implementations are more mature.
+---
+
+### About This Fork
+
+This is a fork of [Cranot/roam-code](https://github.com/Cranot/roam-code). Between v4.3.1 and the upstream v7.2.0 release, we independently developed 12 features that were later implemented in upstream -- often with improvements. The convergence validated our design instincts while upstream's implementations are more mature.
+
+<details>
+<summary><strong>Feature convergence details</strong></summary>
 
 | Feature we built | What upstream improved |
 |-----------------|----------------------|
@@ -48,21 +59,19 @@ This is a fork of [Cranot/roam-code](https://github.com/Cranot/roam-code). Betwe
 | `dead --by-directory`/`--by-kind`/`--summary` grouping | Added dead subgraph cluster detection (`--clusters`) |
 | `grep --source-only`/`--exclude` filtering | Same design, plus `--test-only` filter |
 | `context` multi-symbol batch mode | Added information density scoring and shared-caller analysis |
-| `snapshot`/`trend` health history with CI assertions | DB-backed snapshots (vs our JSON files), sparkline rendering, richer metrics (tangle ratio, avg complexity, brain methods) |
-| Report compound workflows with 4 presets | Added `--md` markdown output, `--config` for custom presets, same 4 built-in presets |
+| `snapshot`/`trend` health history with CI assertions | DB-backed snapshots (vs our JSON files), sparkline rendering, richer metrics |
+| Report compound workflows with 4 presets | Added `--md` markdown output, `--config` for custom presets |
 | JSON envelope (`command`, `timestamp`, `summary`) | Added `version`, `index_age_s`, `project` to envelope, plus `--compact` mode |
-| `pr-risk` change-set novelty signal | Upstream uses `novelty_score` (our `hypergraph_novelty_score`), adds `cluster_spread` and `layer_spread` structural profile |
+| `pr-risk` change-set novelty signal | Upstream uses `novelty_score`, adds `cluster_spread` and `layer_spread` |
 | `diff` JSON parity fixes | Upstream fixed all JSON output paths across v7.0 rewrite |
 
-Upstream v7.2.0 also adds 17+ commands we didn't have: `tour`, `diagnose`, `preflight`, `fitness`, `init`, `digest`, `understand`, `complexity`, `debt`, `conventions`, `bus-factor`, `entry-points`, `breaking`, `alerts`, `patterns`, `safe-zones`, `doc-staleness`, `fn-coupling`, and `affected-tests`. Plus an MCP server (16 tools), SARIF 2.1.0 output, GitHub Action, composite health scoring (0-100), cognitive load index, and verdict-first output.
+Upstream v7.2.0 also adds 17+ commands we didn't have (`tour`, `diagnose`, `preflight`, `fitness`, `init`, `understand`, `complexity`, `debt`, and more), an MCP server (16 tools), SARIF 2.1.0 output, GitHub Action, and composite health scoring (0-100).
+
+</details>
 
 **This fork has been synced to upstream v7.2.0** to adopt all improvements.
 
-|  | Without Roam | With Roam |
-|--|-------------|-----------|
-| Tool calls | 8 | **1** |
-| Wall time | ~11s | **<0.5s** |
-| Tokens consumed | ~15,000 | **~3,000** |
+---
 
 ## Why Roam
 
@@ -201,26 +210,6 @@ roam health                  # score: composite architecture health (0-100)
 | Command | Description |
 |---------|-------------|
 | `roam index [--force] [--verbose]` | Build or rebuild the codebase index |
-<<<<<<< HEAD
-| `roam map [-n N] [--full]` | Project skeleton: files, languages, entry points, top symbols by PageRank |
-| `roam module <path>` | Directory contents: exports, signatures, dependencies, cohesion rating |
-| `roam file <path> [--full]` | File skeleton: all definitions with signatures, no bodies |
-| `roam symbol <name> [--full]` | Symbol definition + callers + callees + metrics. Supports `file:symbol` syntax for disambiguation (e.g., `roam symbol app:Flask`) |
-| `roam context <symbol> [symbol2 ...]` | AI-optimized context. Single-symbol mode: definition + callers + callees + files-to-read with line ranges. Multi-symbol mode: combined context with shared callers and deduped files |
-| `roam coverage-gaps --gate <names> [--scope GLOB]` | Entry-point coverage checker: finds exported functions in scope that do not transitively call gate symbols (auth/logging/validation) |
-| `roam trace <source> <target> [-k N]` | Dependency paths between two symbols with coupling strength and quality scoring. Shows up to k paths (default 3) with edge-kind labels, coupling classification (strong/moderate/weak), hub detection (high-degree intermediates flagged), and path quality ranking. Paths sorted by quality, not just length |
-| `roam deps <path> [--full]` | What a file imports and what imports it |
-| `roam search <pattern> [--kind KIND] [--full]` | Find symbols by name pattern — PageRank-ranked with signatures |
-| `roam grep <pattern> [-g glob] [--source-only] [--exclude GLOBS] [-n N]` | Text search annotated with enclosing symbol context; optional source-only/exclude filtering to reduce docs/config noise |
-| `roam impact <symbol>` | Blast radius: what breaks if a symbol changes |
-| `roam split <file>` | Analyze a file's internal structure: symbol groups, isolation %, cross-group coupling, extraction suggestions |
-| `roam risk [-n N] [--domain KW] [--explain]` | Domain-weighted risk ranking using three-source matching: symbol name keywords, callee-chain analysis (up to 3 hops with decay), and file path-zone matching. `--explain` prints full callee-chain matches for triage. UI files auto-dampened (except zone-matched symbols — zone overrides UI dampening). Tuned keyword weights to reduce false positives from ambiguous terms. Configurable via `.roam/domain-weights.json` and `.roam/path-zones.json` |
-| `roam why <name> [name2 ...]` | Explain why a symbol matters: role classification (Core utility/Hub/Bridge/Leaf/Internal), transitive reach, critical path, cluster, one-line verdict. Batch mode for triage |
-| `roam safe-delete <symbol>` | Check if a symbol can be safely deleted — SAFE/REVIEW/UNSAFE verdict with reasoning |
-| `roam diff [--staged] [--full] [REV_RANGE]` | Blast radius of uncommitted changes or a commit range (e.g., `HEAD~3..HEAD`) |
-| `roam pr-risk [REV_RANGE]` | PR risk score (0-100) + new dead exports + suggested reviewers. Includes historical change-set novelty signal from commit hyperedges |
-| `roam describe [--write] [--force]` | Auto-generate project description (CLAUDE.md) from the index — domain-aware keyword extraction |
-=======
 | `roam init` | Guided onboarding: creates `.roam/fitness.yaml`, CI workflow, runs index, shows health |
 | `roam understand` | Full codebase briefing: tech stack, architecture, key abstractions, health, conventions, complexity overview, entry points |
 | `roam tour [--write PATH]` | Auto-generated onboarding guide: top symbols, reading order, entry points, language breakdown. `--write` saves to Markdown |
@@ -244,7 +233,6 @@ roam health                  # score: composite architecture health (0-100)
 | `roam diagnose <symbol> [--depth N]` | Root cause analysis: ranks upstream/downstream suspects by composite risk (churn + complexity + health + entropy) |
 | `roam preflight <symbol\|file>` | Compound pre-change check: blast radius + tests + complexity + coupling + conventions + fitness. Reduces agent round-trips by 60-70% |
 | `roam safe-delete <symbol>` | Safe deletion check: SAFE/REVIEW/UNSAFE verdict with reasoning |
->>>>>>> fork/upstream-sync-v7.2
 | `roam test-map <name>` | Map a symbol or file to its test coverage |
 
 ### Codebase Health
@@ -265,13 +253,6 @@ roam health                  # score: composite architecture health (0-100)
 
 | Command | Description |
 |---------|-------------|
-<<<<<<< HEAD
-| `roam health [--no-framework]` | Cycles, god components, bottlenecks, layer violations — location-aware severity. Utility paths (composables/, utils/, services/) get relaxed thresholds (3x) for both god components and bottlenecks. Both categorized as "actionable" vs "utility". Cycle severity is directory-aware (single-dir cycles capped at INFO). `--no-framework` filters framework primitives |
-| `roam clusters [--min-size N]` | Community detection vs directory structure — cohesion %, coupling matrices, split suggestions for mega-clusters |
-| `roam layers` | Topological dependency layers + directory breakdown per layer + upward violations |
-| `roam dead [--all] [--by-directory\|--by-kind] [--summary]` | Unreferenced exported symbols with SAFE/REVIEW/INTENTIONAL verdicts and reason column. Supports grouped rollups by directory/kind and summary-only mode. Lifecycle hooks (onMounted, componentDidMount, etc.) auto-classified as INTENTIONAL |
-| `roam fan [symbol\|file] [-n N] [--no-framework]` | Fan-in/fan-out: most connected symbols or files (`--no-framework` filters Vue/React primitives) |
-=======
 | `roam clusters [--min-size N]` | Community detection vs directory structure — cohesion %, coupling matrices, split suggestions |
 | `roam layers` | Topological dependency layers + directory breakdown + upward violations |
 | `roam dead [--all] [--summary] [--clusters]` | Unreferenced exported symbols with SAFE/REVIEW/INTENTIONAL verdicts |
@@ -283,7 +264,6 @@ roam health                  # score: composite architecture health (0-100)
 | `roam patterns` | Architectural pattern recognition: Strategy, Factory, Observer, Repository, Middleware, Decorator |
 | `roam safe-zones` | Graph-based containment boundaries: ISOLATED/CONTAINED/EXPOSED zones |
 | `roam coverage-gaps` | Unprotected entry points with no path to gate symbols (auth, permission checks) |
->>>>>>> fork/upstream-sync-v7.2
 
 ### Exploration
 
@@ -293,12 +273,6 @@ roam health                  # score: composite architecture health (0-100)
 | `roam sketch <dir> [--full]` | Compact structural skeleton of a directory (API surface) |
 | `roam uses <name>` | All consumers: callers, importers, inheritors |
 | `roam owner <path>` | Code ownership: who owns a file or directory |
-<<<<<<< HEAD
-| `roam coupling [-n N] [--mode pair\|set] [--against <file> ... \| --staged \| --pr [--base REF]] [--min-strength F] [--min-cochanges N]` | Temporal coupling: pair mode shows file co-change pairs; set mode shows recurring 3+ file change sets; against mode checks expected co-change partners for a selected change set |
-| `roam snapshot [--tag NAME]` | Persist current structural metrics to `.roam/history.json` |
-| `roam trend [--range N] [--assert EXPR]` | Show structural metric trends from history and optionally enforce CI-style assertions (e.g. `cycles<=8`) |
-| `roam report <preset> [--config FILE]` | Run built-in or custom compound workflows (multi-command reports with section summaries) |
-=======
 | `roam coupling [-n N] [--set]` | Temporal coupling: file pairs that change together. `--set` for hypergraph analysis |
 | `roam fn-coupling` | Function-level temporal coupling across files — hidden dependencies |
 | `roam bus-factor [--brain-methods]` | Knowledge loss risk per module. `--brain-methods` flags functions with cc >= 25 AND 50+ lines |
@@ -306,7 +280,6 @@ roam health                  # score: composite architecture health (0-100)
 | `roam conventions` | Auto-detect naming styles, import preferences, export patterns. Flags outliers |
 | `roam breaking [REV_RANGE]` | Breaking change detection: removed exports, signature changes, renamed symbols |
 | `roam affected-tests <symbol\|file>` | Trace through reverse call graph to test files. Outputs runnable `pytest` command |
->>>>>>> fork/upstream-sync-v7.2
 
 ### Reports & CI
 
@@ -325,25 +298,12 @@ roam health                  # score: composite architecture health (0-100)
 | `roam --version` | Show version |
 | `roam --help` | Categorized command list (7 groups) |
 
-All JSON outputs use a stable top-level envelope:
-- `command`: command name (e.g., `dead`, `health`, `pr-risk`)
-- `timestamp`: UTC ISO-8601 timestamp
-- `summary`: compact command summary for quick automation checks
-
 ```bash
 # Examples
-<<<<<<< HEAD
-roam --json health          # {"cycles": [...], "god_components": [...], "actionable_count": 5, ...}
-roam --json symbol Flask    # {"name": "Flask", "callers": [...], "callees": [...]}
-roam --json why Flask         # {"symbols": [{"name": "Flask", "role": "Hub", "reach": 89, ...}]}
-roam --json diff HEAD~3..HEAD  # {"changed_files": 11, "affected_symbols": 405, ...}
-roam --json pr-risk HEAD~3..HEAD  # {"risk_score": 47, "hypergraph_novelty_score": 0.38, "historical_pattern_support": 0.62, ...}
-=======
 roam --json health               # {"command":"health","score":78,"tangle_pct":5.2,...}
 roam --compact --json health     # minimal envelope, no version/timestamp
 roam health --gate score>=70     # CI gate — fails if score < 70
 roam --json diff HEAD~3..HEAD    # structured blast radius
->>>>>>> fork/upstream-sync-v7.2
 ```
 
 </details>
@@ -531,56 +491,6 @@ Or copy-paste the workflow-oriented instructions below:
 
 This project uses `roam` for codebase comprehension. Always prefer roam over Glob/Grep/Read exploration.
 
-<<<<<<< HEAD
-- `roam map` -- project overview, entry points, key symbols
-- `roam file <path>` -- file skeleton with all definitions
-- `roam symbol <name>` -- definition + callers + callees
-- `roam context <name> [name2 ...]` -- AI context for one symbol or a related symbol batch with shared callers/files
-- `roam coverage-gaps --gate requireUser,requireAuth --scope app/routes/**` -- find uncovered entry points missing transitive gate calls
-- `roam deps <path>` -- file import/imported-by graph
-- `roam trace <source> <target>` -- dependency paths with coupling strength, hub detection, quality ranking
-- `roam search <pattern>` -- find symbols by name (PageRank-ranked with signatures)
-- `roam grep <pattern>` -- text search with symbol context (`--source-only` and `--exclude` to suppress docs/config noise)
-- `roam health` -- architecture problems with location-aware severity (utility paths get relaxed thresholds for god components and bottlenecks, `--no-framework` filters primitives)
-- `roam weather` -- hotspots (churn x complexity)
-- `roam impact <symbol>` -- blast radius (what breaks if changed)
-- `roam split <file>` -- internal symbol groups with isolation % and extraction suggestions
-- `roam risk` -- domain-weighted risk ranking (3-source matching: name + callee-chain + path-zone, `--explain` for full chain output)
-- `roam why <name>` -- role, reach, criticality, verdict (batch: `roam why A B C`)
-- `roam safe-delete <symbol>` -- check if safe to delete (SAFE/REVIEW/UNSAFE verdict)
-- `roam diff` -- blast radius of uncommitted changes
-- `roam diff --staged` -- blast radius of staged changes
-- `roam diff HEAD~3..HEAD` -- blast radius of a commit range
-- `roam diff main..HEAD` -- blast radius of branch commits vs base
-- `roam pr-risk HEAD~3..HEAD` -- PR risk score (0-100) + dead exports + reviewers + change-set novelty
-- `roam owner <path>` -- code ownership (who should review)
-- `roam coupling` -- temporal coupling (hidden dependencies)
-- `roam coupling --mode set` -- recurring 3+ file change sets from commit hyperedges
-- `roam snapshot --tag baseline` -- persist current structural metrics to history
-- `roam trend --range 5 --assert cycles<=8` -- view trend rows and enforce metric thresholds
-- `roam report first-contact` -- run a bundled compound workflow and return section-level results
-- `roam fan [symbol|file]` -- fan-in/fan-out (`--no-framework` to filter primitives)
-- `roam dead` -- unreferenced exports with SAFE/REVIEW/INTENTIONAL verdicts (`--by-directory`, `--by-kind`, `--summary` for planning)
-- `roam uses <name>` -- all consumers: callers, importers, inheritors
-- `roam clusters` -- code communities with cohesion %, coupling matrices, split suggestions
-- `roam layers` -- dependency layers with directory breakdown
-- `roam describe` -- auto-generate CLAUDE.md from the index
-- `roam test-map <name>` -- map symbols/files to test coverage
-- `roam sketch <dir>` -- structural skeleton of a directory
-
-Use `roam --json <command>` for structured JSON output (all 29 commands).
-For PR triage bots, prefer `roam --json pr-risk <range>` and read:
-- `risk_score` (0-100)
-- `hypergraph_novelty_score` (0.0-1.0, higher means less historical support)
-- `historical_pattern_support` (0.0-1.0, overlap with known recurring change sets)
-- `best_pattern_overlap` (best Jaccard overlap against historical change sets)
-
-Use coupling modes deliberately:
-- `roam coupling` (pair mode) for broad hidden dependency scanning
-- `roam coupling --mode set` when you need recurring multi-file change patterns for planning/refactoring
-
-If `--mode set` is empty on a long-lived repo, rebuild Git signals with `roam index --force` once (older indexes may not have commit hyperedges yet).
-=======
 Before modifying any code:
 1. First time in the repo: `roam understand` then `roam tour` (auto-generated onboarding guide)
 2. Find a symbol: `roam search <pattern>`
@@ -593,7 +503,6 @@ Additional commands: `roam health` (0-100 score), `roam impact <name>` (what bre
 `roam pr-risk` (PR risk score), `roam file <path>` (file skeleton).
 
 Run `roam --help` for all 50 commands. Use `roam --json <cmd>` for structured output.
->>>>>>> fork/upstream-sync-v7.2
 ```
 
 <details>
@@ -640,13 +549,6 @@ The pattern is the same for any tool that can execute shell commands: tell the a
 
 ## MCP Server
 
-<<<<<<< HEAD
-- **After `git pull` / branch switch:** `roam index` (incremental, fast)
-- **After major refactor or first clone:** `roam index --force` (full rebuild)
-- **After upgrading to hypergraph-backed coupling/pr-risk from an older index:** `roam index --force` (backfills commit hyperedges)
-- **Index seems stale or corrupt:** `roam index --force`
-- **No rebuild needed:** Roam auto-detects changed files on every `roam index` run
-=======
 Roam includes a [Model Context Protocol](https://modelcontextprotocol.io/) server for direct integration with AI tools that support MCP (Claude Desktop, Claude Code, etc.).
 
 ```bash
@@ -921,7 +823,6 @@ This eliminates the security review that blocks most tool adoptions.
 | **CodeScene** | Free, local alternative for health scoring and hotspot analysis. No SaaS subscription |
 | **ESLint / Pylint** | Cross-language architecture checks. Linters enforce style per file; Roam enforces architecture across the codebase |
 | **LSP** (editor navigation) | AI-agent-optimized queries. `roam context` answers "what calls this?" with PageRank-ranked results in one shell command |
->>>>>>> fork/upstream-sync-v7.2
 
 ## Language Support
 
@@ -1149,18 +1050,6 @@ Roam is a static analysis tool. These are fundamental trade-offs, not bugs:
 
 | Problem | Solution |
 |---------|----------|
-<<<<<<< HEAD
-| `roam: command not found` | Ensure install location is on PATH. For `uv`: run `uv tool update-shell`. For `pip`: check `pip show roam-code` for install path. |
-| `Another indexing process is running` | A previous `roam index` crashed and left a stale lock. Delete `.roam/index.lock` and retry. |
-| `database is locked` or corrupt index | Run `roam index --force` to rebuild from scratch. |
-| Unicode errors on Windows | Roam handles UTF-8 and Latin-1 files. If you see `charmap` errors, ensure your terminal uses UTF-8 (`chcp 65001`). |
-| `.vue` / `.svelte` files not indexed | Both are Tier 1 (script block extraction). Ensure files have a `<script>` tag. Other SFC frameworks -- file an issue. |
-| Too many false positives in `roam dead` | Check the "N files had no symbols extracted" note. Files without parsers don't produce symbols, so their exports appear unreferenced. |
-| Symbol resolves to wrong file | Use `file:symbol` syntax: `roam symbol myfile:MyFunction` to disambiguate. |
-| Vue template functions show fan-in:0 | Rebuild the index with `roam index --force` (v4.3.1 fixed multi-line attribute detection + callback references + shorthand properties). |
-| `roam coupling --mode set` returns no rows | Run `roam index --force` once to backfill commit hyperedges, then retry. |
-| Slow first index | Expected for large projects. Use `roam index --verbose` to monitor progress. Subsequent runs are incremental. |
-=======
 | `roam: command not found` | Ensure install location is on PATH. For `uv`: run `uv tool update-shell`. For `pip`: check `pip show roam-code` for install path |
 | `Another indexing process is running` | Previous `roam index` crashed. Delete `.roam/index.lock` and retry |
 | `database is locked` or corrupt index | Run `roam index --force` to rebuild from scratch |
@@ -1172,7 +1061,6 @@ Roam is a static analysis tool. These are fundamental trade-offs, not bugs:
 | Health score seems wrong | Check `roam health --json` for factor breakdown. Utility paths get relaxed thresholds |
 | `--gate` not failing | Ensure the metric name matches (e.g., `score`, `tangle_pct`). Check `roam health --json` for available fields |
 | Index seems stale after `git pull` | Run `roam index` (incremental, fast). After major refactors: `roam index --force` |
->>>>>>> fork/upstream-sync-v7.2
 
 ## Update / Uninstall
 

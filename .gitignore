@@ -37,3 +37,6 @@ env/
 
 # Git worktrees
 .worktrees/
+
+# Ephemeral plans
+docs/plans/

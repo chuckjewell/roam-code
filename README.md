@@ -35,6 +35,29 @@ $ roam pr-risk HEAD~3..HEAD      # 0-100 risk score + dead exports + reviewers
 $ roam diff                      # blast radius of your uncommitted changes
 ```
 
+## About This Fork
+
+This is a fork of [Cranot/roam-code](https://github.com/Cranot/roam-code). Between v4.3.1 and the upstream v7.2.0 release, we independently developed 12 features that were later implemented in upstream — often with improvements. The convergence validated our design instincts while upstream's implementations are more mature.
+
+| Feature we built | What upstream improved |
+|-----------------|----------------------|
+| Hypergraph n-ary coupling (commit-level change sets) | Added `sig_hash` for deduplication, `batched_in` for SQL safety |
+| Coupling `--against`/`--staged`/`--pr` modes | Added Jaccard surprise scoring for novelty detection |
+| `coverage-gaps` gate reachability analysis | Added `batched_in`, regex gate patterns, scope filtering |
+| `risk --explain` callee-chain reasoning | Same design, integrated with upstream's richer risk model |
+| `dead --by-directory`/`--by-kind`/`--summary` grouping | Added dead subgraph cluster detection (`--clusters`) |
+| `grep --source-only`/`--exclude` filtering | Same design, plus `--test-only` filter |
+| `context` multi-symbol batch mode | Added information density scoring and shared-caller analysis |
+| `snapshot`/`trend` health history with CI assertions | DB-backed snapshots (vs our JSON files), sparkline rendering, richer metrics (tangle ratio, avg complexity, brain methods) |
+| Report compound workflows with 4 presets | Added `--md` markdown output, `--config` for custom presets, same 4 built-in presets |
+| JSON envelope (`command`, `timestamp`, `summary`) | Added `version`, `index_age_s`, `project` to envelope, plus `--compact` mode |
+| `pr-risk` change-set novelty signal | Upstream uses `novelty_score` (our `hypergraph_novelty_score`), adds `cluster_spread` and `layer_spread` structural profile |
+| `diff` JSON parity fixes | Upstream fixed all JSON output paths across v7.0 rewrite |
+
+Upstream v7.2.0 also adds 17+ commands we didn't have: `tour`, `diagnose`, `preflight`, `fitness`, `init`, `digest`, `understand`, `complexity`, `debt`, `conventions`, `bus-factor`, `entry-points`, `breaking`, `alerts`, `patterns`, `safe-zones`, `doc-staleness`, `fn-coupling`, and `affected-tests`. Plus an MCP server (16 tools), SARIF 2.1.0 output, GitHub Action, composite health scoring (0-100), cognitive load index, and verdict-first output.
+
+**This fork is syncing to upstream v7.2.0** to adopt all improvements. Our benchmark harness (`src/roam/benchmarks/`) is the only fork-exclusive code being carried forward. See `docs/plans/2026-02-12-upstream-sync-v7-design.md` for the full sync design.
+
 ## Table of Contents
 
 - [Install](#install)

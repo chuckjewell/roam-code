@@ -34,3 +34,9 @@ bench-repos/
 venv/
 .venv/
 env/
+
+# Git worktrees
+.worktrees/
+
+# Ephemeral plans
+docs/plans/
